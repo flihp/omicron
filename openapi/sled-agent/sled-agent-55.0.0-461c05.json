@@ -7,7 +7,7 @@
       "url": "https://oxide.computer",
       "email": "api@oxide.computer"
     },
-    "version": "54.0.0"
+    "version": "55.0.0"
   },
   "paths": {
     "/artifacts": {
@@ -167,6 +167,33 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/ArtifactConfig"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/attest": {
+      "post": {
+        "summary": "Perform a platform attestation qualified by the provided data.",
+        "operationId": "attest",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QualifyingData"
               }
             }
           },
@@ -8804,6 +8831,18 @@
           "enable_isa"
         ],
         "additionalProperties": false
+      },
+      "QualifyingData": {
+        "description": "Caller chosen data used to qualify a platform attestation. This is typically a random nonce provided as part of an attestation challenge to guarantee freshness thereby preventing replay attacks. It must not be reused.",
+        "x-rust-type": {
+          "crate": "byte-wrapper",
+          "path": "byte_wrapper::HexArray::<32>",
+          "version": "0.1.0"
+        },
+        "type": "string",
+        "pattern": "^[0-9a-fA-F]{64}$",
+        "minLength": 64,
+        "maxLength": 64
       },
       "RackNetworkConfig": {
         "description": "Initial network configuration",

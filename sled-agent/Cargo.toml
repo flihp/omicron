@@ -123,6 +123,7 @@ tufaceous-artifact.workspace = true
 tufaceous-brand-metadata.workspace = true
 usdt.workspace = true
 uuid.workspace = true
+vm-attest.workspace = true
 walkdir.workspace = true
 x509-cert.workspace = true
 zeroize.workspace = true

@@ -35,6 +35,7 @@ api_versions!([
     // |  example for the next person.
     // v
     // (next_int, IDENT),
+    (55, ADD_PLATFORM_ATTEST),
     (54, ADD_LOG_TIME_RANGE),
     (53, ADD_INSTANCE_MANAGER_STATUS_TO_INVENTORY),
     (52, TYPED_ARTIFACT_CONFIG_GENERATION),
@@ -1617,4 +1618,15 @@ pub trait SledAgentApi {
         path_params: Path<latest::rot::RotPathParams>,
         body: TypedBody<latest::rot::Nonce>,
     ) -> Result<HttpResponseOk<latest::rot::Attestation>, HttpError>;
+
+    /// Perform a platform attestation qualified by the provided data.
+    #[endpoint {
+        method = POST,
+        path = "/attest",
+        versions = VERSION_ADD_PLATFORM_ATTEST..,
+    }]
+    async fn attest(
+        request_context: RequestContext<Self::Context>,
+        body: TypedBody<latest::platform_attest::QualifyingData>,
+    ) -> Result<HttpResponseUpdatedNoContent, HttpError>;
 }

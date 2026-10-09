@@ -28,6 +28,7 @@ mod instance_manager;
 mod long_running_tasks;
 mod metrics;
 mod nexus;
+mod platform_attest;
 mod probe_manager;
 mod profile;
 pub(crate) mod rot;

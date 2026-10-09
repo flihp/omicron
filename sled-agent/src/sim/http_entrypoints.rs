@@ -60,6 +60,7 @@ use sled_agent_types::instance::{
     VmmPutStateResponse, VmmUnregisterResponse, VpcPathParam,
 };
 use sled_agent_types::inventory::{Inventory, OmicronSledConfig};
+use sled_agent_types::platform_attest::QualifyingData;
 use sled_agent_types::probes::ProbeSet;
 use sled_agent_types::rot::{
     Attestation, CertificateChain, MeasurementLog, Nonce, RotPathParams,
@@ -1158,6 +1159,13 @@ impl SledAgentApi for SledAgentSimImpl {
         _path_params: Path<RotPathParams>,
         _body: TypedBody<Nonce>,
     ) -> Result<HttpResponseOk<Attestation>, HttpError> {
+        method_unimplemented()
+    }
+
+    async fn attest(
+        _request_context: RequestContext<Self::Context>,
+        _body: TypedBody<QualifyingData>,
+    ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
         method_unimplemented()
     }
 }

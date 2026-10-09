@@ -5,6 +5,7 @@
 //! HTTP entrypoint functions for the sled agent's exposed API
 
 use super::sled_agent::SledAgent;
+use crate::platform_attest;
 use crate::sled_agent::Error as SledAgentError;
 use crate::support_bundle::storage::SupportBundleQueryType;
 use crate::zone_bundle::BundleError;
@@ -49,6 +50,7 @@ use sled_agent_types::instance::{
     VmmPutStateResponse, VmmUnregisterResponse, VpcPathParam,
 };
 use sled_agent_types::inventory::{Inventory, OmicronSledConfig};
+use sled_agent_types::platform_attest::QualifyingData;
 use sled_agent_types::probes::ProbeSet;
 use sled_agent_types::rot::{
     Attestation, CertificateChain, MeasurementLog, Nonce, RotPathParams,
@@ -1838,6 +1840,20 @@ impl SledAgentApi for SledAgentImpl {
                     sa.rot_attestor(path_params.into_inner().rot, remote_addr)?;
                 let attestation = rot.attest(nonce.into()).await?;
                 Ok(HttpResponseOk(attestation.into()))
+            })
+            .await
+    }
+
+    async fn attest(
+        request_context: RequestContext<Self::Context>,
+        body: TypedBody<QualifyingData>,
+    ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+        let sa = request_context.context();
+        let qdata = platform_attest::QualifyingData::from(body.into_inner());
+        sa.latencies()
+            .instrument_dropshot_handler(&request_context, async {
+                platform_attest::attest(qdata.into())?;
+                Ok(HttpResponseUpdatedNoContent())
             })
             .await
     }

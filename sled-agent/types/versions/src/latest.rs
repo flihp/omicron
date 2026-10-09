@@ -229,6 +229,10 @@ pub mod inventory {
     pub use crate::impls::inventory::ZpoolHealthParseError;
 }
 
+pub mod platform_attest {
+    pub use crate::v55::platform_attest::QualifyingData;
+}
+
 pub mod probes {
     pub use crate::v10::probes::ExternalIp;
     pub use crate::v10::probes::IpKind;
