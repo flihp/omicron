@@ -705,6 +705,7 @@ omicron-zone-package = "0.12.3"
 oxide-client = { path = "clients/oxide-client" }
 # hese two crates share types must be kept in sync
 attest-mock = { git = "https://github.com/oxidecomputer/dice-util", rev = "058747d1d52c10ed5e7b3a7ae445529e7e594311" }
+dice-verifier = { git = "https://github.com/oxidecomputer/dice-util", rev = "058747d1d52c10ed5e7b3a7ae445529e7e594311", default-features = false }
 oxide-rot = { git = "https://github.com/oxidecomputer/dice-util", rev = "058747d1d52c10ed5e7b3a7ae445529e7e594311", default-features = false }
 oxide-tokio-rt = "0.1.4"
 oxide-update-engine = "0.1.2"
