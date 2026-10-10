@@ -4,8 +4,8 @@
 
 //! Mechanisms for interacting with the sled's RoT.
 
-use dice_verifier::{Attest, AttestError, ipcc, mock};
 use dropshot::HttpError;
+use oxide_rot::{Attest, AttestError, ipcc, mock};
 use sled_agent_types::rot as SaRotTypes;
 use slog::Logger;
 use slog_error_chain::InlineErrorChain;
@@ -17,10 +17,10 @@ use tokio::sync::{
 };
 use x509_cert::der::{EncodePem, pem::LineEnding};
 
-pub struct MeasurementLog(dice_verifier::Log);
+pub struct MeasurementLog(oxide_rot::Log);
 
-impl From<dice_verifier::Log> for MeasurementLog {
-    fn from(log: dice_verifier::Log) -> Self {
+impl From<oxide_rot::Log> for MeasurementLog {
+    fn from(log: oxide_rot::Log) -> Self {
         MeasurementLog(log)
     }
 }
@@ -32,7 +32,7 @@ impl From<MeasurementLog> for SaRotTypes::MeasurementLog {
             .iter()
             .copied()
             .map(|m| match m {
-                dice_verifier::Measurement::Sha3_256(d) => {
+                oxide_rot::Measurement::Sha3_256(d) => {
                     SaRotTypes::Measurement::Sha3_256(
                         SaRotTypes::Sha3_256Digest(d.0),
                     )
@@ -61,22 +61,22 @@ impl From<CertificateChain> for SaRotTypes::CertificateChain {
     }
 }
 
-pub struct Nonce(dice_verifier::Nonce);
+pub struct Nonce(oxide_rot::Nonce);
 
 impl From<SaRotTypes::Nonce> for Nonce {
     fn from(nonce: SaRotTypes::Nonce) -> Self {
         match nonce {
             SaRotTypes::Nonce::N32(n32) => {
-                Nonce(dice_verifier::Nonce::N32(n32.into()))
+                Nonce(oxide_rot::Nonce::N32(n32.into()))
             }
         }
     }
 }
 
-pub struct Attestation(dice_verifier::Attestation);
+pub struct Attestation(oxide_rot::Attestation);
 
-impl From<dice_verifier::Attestation> for Attestation {
-    fn from(att: dice_verifier::Attestation) -> Self {
+impl From<oxide_rot::Attestation> for Attestation {
+    fn from(att: oxide_rot::Attestation) -> Self {
         Attestation(att)
     }
 }
@@ -84,7 +84,7 @@ impl From<dice_verifier::Attestation> for Attestation {
 impl From<Attestation> for SaRotTypes::Attestation {
     fn from(att: Attestation) -> Self {
         match att.0 {
-            dice_verifier::Attestation::Ed25519(sig) => {
+            oxide_rot::Attestation::Ed25519(sig) => {
                 SaRotTypes::Attestation::Ed25519(SaRotTypes::Ed25519Signature(
                     sig.0,
                 ))
@@ -96,7 +96,7 @@ impl From<Attestation> for SaRotTypes::Attestation {
 #[derive(Debug, Error)]
 pub enum RotError {
     #[error("failed to create IPCC attestor: {0}")]
-    AttestIpcc(#[from] dice_verifier::ipcc::IpccError),
+    AttestIpcc(#[from] oxide_rot::ipcc::IpccError),
 
     #[error("failed to create mock attestor: {0}")]
     AttestMock(#[from] mock::AttestMockError),
@@ -182,16 +182,16 @@ impl RotAttestationHandle {
 /// The semantics are:
 ///  1. Attestation requests (on a real sled) are proxied through a few layers:
 ///     Sled Agent ([`RotAttestationTask`]) <--(via IPCC)--> SP <-> RoT.
-///     Those IPCC calls are made via an IOCTL (via [`ipcc::AttestIpcc`]) and
-///     thus should be treated as "blocking I/O".
+///     Those IPCC calls are made via an IOCTL (via [`ipcc::AttestIpcc`]),
+///     which `AttestIpcc` itself runs on a blocking thread.
 ///  2. There is only a single outstanding attestation request at any point.
-///  3. (1) + (2) leads us to service requests (via [`RotAttestationHandle`])
-///     from a single queue which is drained by a task started via
-///     `spawn_blocking()` -- [`RotAttestationTask::run`].
+///  3. (2) leads us to service requests (via [`RotAttestationHandle`])
+///     from a single queue which is drained by a single task --
+///     [`RotAttestationTask::run`].
 pub struct RotAttestationTask {
     log: Logger,
     rx: mpsc::Receiver<AttestationMessage>,
-    attest: Box<dyn Attest + Send>,
+    attest: Box<dyn Attest + Send + Sync>,
 }
 
 impl RotAttestationTask {
@@ -203,7 +203,7 @@ impl RotAttestationTask {
         attest_config: &AttestConfig,
     ) -> Result<RotAttestationHandle, RotError> {
         let (task, handle) = Self::new(log, attest_config)?;
-        tokio::task::spawn_blocking(move || task.run());
+        tokio::spawn(task.run());
         Ok(handle)
     }
 
@@ -219,8 +219,8 @@ impl RotAttestationTask {
             }
         ));
 
-        let attest: Box<dyn Attest + Send> = match attest_config {
-            AttestConfig::Ipcc => Box::new(ipcc::AttestIpcc::new()?),
+        let attest: Box<dyn Attest + Send + Sync> = match attest_config {
+            AttestConfig::Ipcc => Box::new(ipcc::AttestIpcc::new()),
             AttestConfig::Local {
                 priv_key,
                 cert_chain,
@@ -239,31 +239,30 @@ impl RotAttestationTask {
     /// Run the main request handler loop that processes incoming RoT
     /// attestation requests.
     ///
-    /// This should be run via `spawn_blocking` as we perform ipcc operations
-    /// via an ioctl and don't want to block any other tasks.
-    fn run(mut self) {
+    async fn run(mut self) {
         info!(self.log, "request loop started.");
         loop {
-            let Some(req) = self.rx.blocking_recv() else {
+            let Some(req) = self.rx.recv().await else {
                 warn!(self.log, "All senders dropped. Exiting.");
                 break;
             };
 
             match req {
                 AttestationMessage::GetMeasurementLog(reply_tx) => {
-                    let log = self.attest.get_measurement_log();
+                    let log = self.attest.get_measurement_log().await;
                     let _ = reply_tx.send(log.map(Into::into));
                 }
                 AttestationMessage::GetCertificateChain(reply_tx) => {
-                    let chain =
-                        self.attest.get_certificates().and_then(|chain| {
+                    let chain = self.attest.get_certificates().await.and_then(
+                        |chain| {
                             CertificateChain::try_from(chain)
                                 .map_err(AttestError::from)
-                        });
+                        },
+                    );
                     let _ = reply_tx.send(chain);
                 }
                 AttestationMessage::Attest(nonce, reply_tx) => {
-                    let attestation = self.attest.attest(&nonce.0);
+                    let attestation = self.attest.attest(&nonce.0).await;
                     let _ = reply_tx.send(attestation.map(Into::into));
                 }
             }

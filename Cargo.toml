@@ -449,7 +449,6 @@ assert_cmd = "2.0.17"
 async-bb8-diesel = "0.2"
 async-recursion = "1.1.1"
 async-trait = "0.1.89"
-attest-mock = { git = "https://github.com/oxidecomputer/dice-util", rev = "4a39ef08d81e5177edee0bddb1146032aa21074d" }
 atomicwrites = "0.4.4"
 authz-macros = { path = "nexus/authz-macros" }
 backoff = { version = "0.4.0", features = [ "tokio" ] }
@@ -515,7 +514,6 @@ debug-ignore = "1.0.5"
 derive_more = "0.99.20"
 derive-where = "1.5.0"
 dev-tools-common = { path = "dev-tools/common" }
-dice-verifier = { git = "https://github.com/oxidecomputer/dice-util", rev = "ff9f27aa0d6ef6fb64c349890b6e3c242ea3d8fc", default-features = false }
 # Having the i-implement-... feature here makes diesel go away from the workspace-hack
 diesel = { version = "2.3.7", features = ["i-implement-a-third-party-backend-and-opt-into-breaking-changes", "postgres", "r2d2", "chrono", "serde_json", "network-address", "uuid"] }
 diesel-dtrace = "0.5.0"
@@ -705,6 +703,9 @@ omicron-test-utils = { path = "test-utils" }
 omicron-workspace-hack = "0.1.0"
 omicron-zone-package = "0.12.3"
 oxide-client = { path = "clients/oxide-client" }
+# hese two crates share types must be kept in sync
+attest-mock = { git = "https://github.com/oxidecomputer/dice-util", rev = "058747d1d52c10ed5e7b3a7ae445529e7e594311" }
+oxide-rot = { git = "https://github.com/oxidecomputer/dice-util", rev = "058747d1d52c10ed5e7b3a7ae445529e7e594311", default-features = false }
 oxide-tokio-rt = "0.1.4"
 oxide-update-engine = "0.1.2"
 oxide-update-engine-types = { version = "0.1.2", features = ["schemars08"] }
