@@ -270,3 +270,177 @@ impl RotAttestationTask {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use attest_mock::MockData;
+    use camino::Utf8Path;
+    use camino_tempfile::Utf8TempDir;
+    use dice_verifier::verify_attestation;
+    use omicron_test_utils::dev::test_setup_log;
+    use sprockets_tls_test_utils::{
+        OutputFileExistsBehavior, alias_prefix, certlist_path, private_key_path,
+    };
+    use x509_cert::{Certificate, der::DecodePem};
+
+    // An arbitrary digest for the single measurement in the mock log.
+    const DIGEST: &str =
+        "be4df4e085175f3de0c8ac4837e1c2c9a34e8983209dac6b549e94154f7cdd9c";
+
+    /// Write the keys, certs, and measurement log needed by the mock RoT
+    /// to `dir`.
+    fn write_mock_data(dir: &Utf8Path) {
+        let behavior = OutputFileExistsBehavior::Overwrite;
+        let doc = sprockets_tls_test_utils::generate_config(1);
+        doc.write_key_pairs(dir.to_owned(), behavior).unwrap();
+        doc.write_certificates(dir.to_owned(), behavior).unwrap();
+        doc.write_certificate_lists(dir.to_owned(), behavior).unwrap();
+
+        let log_kdl = format!(
+            r#"
+            measurement {{
+                algorithm "sha3-256"
+                digest "{DIGEST}"
+            }}
+            "#
+        );
+        let log = attest_mock::MockLog::parse("log.kdl", &log_kdl)
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        std::fs::write(dir.join("log.bin"), &log).unwrap();
+    }
+
+    /// Write the mock RoT's data to `dir` and return a config that uses it.
+    fn mock_config(dir: &Utf8Path) -> AttestConfig {
+        write_mock_data(dir);
+
+        let alias = alias_prefix(1);
+        AttestConfig::Local {
+            priv_key: private_key_path(dir.to_owned(), &alias),
+            cert_chain: certlist_path(dir.to_owned(), &alias),
+            log: dir.join("log.bin"),
+            test_corpus: vec![],
+        }
+    }
+
+    /// Create a `RotAttestationHandle` backed by the mock RoT, writing its
+    /// data to `dir`.
+    fn mock_attestor(log: &Logger, dir: &Utf8Path) -> RotAttestationHandle {
+        RotAttestationTask::launch(log, &mock_config(dir)).unwrap()
+    }
+
+    /// A mock-backed attestor whose request queue can be filled and drained
+    /// on demand.
+    ///
+    /// The attestation task isn't started until the queue is drained, so
+    /// requests queued by `fill_queue` remain outstanding until then.
+    struct QueueTestAttestor {
+        attestor: RotAttestationHandle,
+        task: Option<RotAttestationTask>,
+        pending: Vec<oneshot::Receiver<Result<MeasurementLog, AttestError>>>,
+    }
+
+    impl QueueTestAttestor {
+        fn new(log: &Logger, dir: &Utf8Path) -> Self {
+            let (task, attestor) =
+                RotAttestationTask::new(log, &mock_config(dir)).unwrap();
+            Self { attestor, task: Some(task), pending: Vec::new() }
+        }
+
+        /// Occupy every queue slot, as if `QUEUE_SIZE` requests were
+        /// outstanding.
+        fn fill_queue(&mut self) {
+            for _ in 0..QUEUE_SIZE {
+                let (tx, rx) = oneshot::channel();
+                let msg = AttestationMessage::GetMeasurementLog(tx);
+                assert!(self.attestor.tx.try_send(msg).is_ok());
+                self.pending.push(rx);
+            }
+        }
+
+        /// Complete the outstanding requests queued by `fill_queue`.
+        async fn drain_queue(&mut self) {
+            if let Some(task) = self.task.take() {
+                tokio::task::spawn_blocking(move || task.run());
+            }
+            for rx in self.pending.drain(..) {
+                rx.await.unwrap().unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rot_attestor_mock() {
+        let logctx = test_setup_log("rot_attestor_mock");
+        let tmp = Utf8TempDir::new().unwrap();
+        let attestor = mock_attestor(&logctx.log, tmp.path());
+
+        let log = attestor.get_measurement_log().await.unwrap();
+        let chain = attestor.get_certificate_chain().await.unwrap();
+        let nonce: Nonce = SaRotTypes::Nonce::N32([7u8; 32]).into();
+        let attestation = attestor.attest(Nonce(nonce.0)).await.unwrap();
+
+        // The first cert in the chain is the leaf: the alias cert whose key
+        // signed the attestation.
+        let alias = Certificate::from_pem(&chain.0[0]).unwrap();
+        verify_attestation(&alias, &attestation.0, &log.0, &nonce.0)
+            .expect("attestation should verify against the alias cert");
+
+        let log: SaRotTypes::MeasurementLog = log.into();
+        assert_eq!(log.0.len(), 1);
+        let SaRotTypes::Measurement::Sha3_256(digest) = &log.0[0];
+        assert_eq!(hex::encode(digest.0), DIGEST);
+
+        let chain: SaRotTypes::CertificateChain = chain.into();
+        assert!(!chain.0.is_empty());
+        assert!(
+            chain
+                .0
+                .iter()
+                .all(|c| c.starts_with("-----BEGIN CERTIFICATE-----"))
+        );
+
+        let SaRotTypes::Attestation::Ed25519(sig) = attestation.into();
+        assert_eq!(sig.0.len(), 64);
+
+        logctx.cleanup_successful();
+    }
+
+    #[tokio::test]
+    async fn rot_attestor_busy() {
+        let logctx = test_setup_log("rot_attestor_busy");
+        let tmp = Utf8TempDir::new().unwrap();
+        let mut rot = QueueTestAttestor::new(&logctx.log, tmp.path());
+        rot.fill_queue();
+
+        // Further requests are rejected immediately rather than waiting.
+        assert!(matches!(
+            rot.attestor.get_measurement_log().await,
+            Err(RotError::Busy)
+        ));
+        assert!(matches!(
+            rot.attestor.get_certificate_chain().await,
+            Err(RotError::Busy)
+        ));
+        let nonce: Nonce = SaRotTypes::Nonce::N32([7u8; 32]).into();
+        assert!(matches!(
+            rot.attestor.attest(nonce).await,
+            Err(RotError::Busy)
+        ));
+
+        // Busy is reported to clients as 503 Service Unavailable.
+        let err: HttpError = RotError::Busy.into();
+        assert_eq!(
+            err.status_code.as_status(),
+            http::StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        // Once the outstanding requests complete, new ones succeed.
+        rot.drain_queue().await;
+        rot.attestor.get_measurement_log().await.unwrap();
+
+        logctx.cleanup_successful();
+    }
+}
