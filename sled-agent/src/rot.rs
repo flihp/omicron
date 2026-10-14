@@ -4,8 +4,8 @@
 
 //! Mechanisms for interacting with the sled's RoT.
 
-use dice_verifier::{Attest, AttestError, ipcc, mock};
 use dropshot::HttpError;
+use oxide_rot::{Attest, AttestError, ipcc, mock};
 use sled_agent_types::rot as SaRotTypes;
 use slog::Logger;
 use slog_error_chain::InlineErrorChain;
@@ -14,10 +14,10 @@ use thiserror::Error;
 use tokio::sync::{Mutex, MutexGuard, Semaphore, SemaphorePermit};
 use x509_cert::der::{EncodePem, pem::LineEnding};
 
-pub struct MeasurementLog(dice_verifier::Log);
+pub struct MeasurementLog(oxide_rot::Log);
 
-impl From<dice_verifier::Log> for MeasurementLog {
-    fn from(log: dice_verifier::Log) -> Self {
+impl From<oxide_rot::Log> for MeasurementLog {
+    fn from(log: oxide_rot::Log) -> Self {
         MeasurementLog(log)
     }
 }
@@ -29,7 +29,7 @@ impl From<MeasurementLog> for SaRotTypes::MeasurementLog {
             .iter()
             .copied()
             .map(|m| match m {
-                dice_verifier::Measurement::Sha3_256(d) => {
+                oxide_rot::Measurement::Sha3_256(d) => {
                     SaRotTypes::Measurement::Sha3_256(
                         SaRotTypes::Sha3_256Digest(d.0),
                     )
@@ -58,22 +58,22 @@ impl From<CertificateChain> for SaRotTypes::CertificateChain {
     }
 }
 
-pub struct Nonce(dice_verifier::Nonce);
+pub struct Nonce(oxide_rot::Nonce);
 
 impl From<SaRotTypes::Nonce> for Nonce {
     fn from(nonce: SaRotTypes::Nonce) -> Self {
         match nonce {
             SaRotTypes::Nonce::N32(n32) => {
-                Nonce(dice_verifier::Nonce::N32(n32.into()))
+                Nonce(oxide_rot::Nonce::N32(n32.into()))
             }
         }
     }
 }
 
-pub struct Attestation(dice_verifier::Attestation);
+pub struct Attestation(oxide_rot::Attestation);
 
-impl From<dice_verifier::Attestation> for Attestation {
-    fn from(att: dice_verifier::Attestation) -> Self {
+impl From<oxide_rot::Attestation> for Attestation {
+    fn from(att: oxide_rot::Attestation) -> Self {
         Attestation(att)
     }
 }
@@ -81,7 +81,7 @@ impl From<dice_verifier::Attestation> for Attestation {
 impl From<Attestation> for SaRotTypes::Attestation {
     fn from(att: Attestation) -> Self {
         match att.0 {
-            dice_verifier::Attestation::Ed25519(sig) => {
+            oxide_rot::Attestation::Ed25519(sig) => {
                 SaRotTypes::Attestation::Ed25519(SaRotTypes::Ed25519Signature(
                     sig.0,
                 ))
@@ -208,7 +208,7 @@ mod tests {
     use attest_mock::MockData;
     use camino::Utf8Path;
     use camino_tempfile::Utf8TempDir;
-    use dice_verifier::verify_attestation;
+    use dice_verifier::oxide_rot::verify_attestation;
     use omicron_test_utils::dev::test_setup_log;
     use sprockets_tls_test_utils::{
         OutputFileExistsBehavior, alias_prefix, certlist_path, private_key_path,
