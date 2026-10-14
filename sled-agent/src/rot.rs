@@ -11,10 +11,7 @@ use slog::Logger;
 use slog_error_chain::InlineErrorChain;
 use sprockets_tls::keys::AttestConfig;
 use thiserror::Error;
-use tokio::sync::{
-    mpsc::{self, error::TrySendError},
-    oneshot,
-};
+use tokio::sync::{Mutex, MutexGuard, Semaphore, SemaphorePermit};
 use x509_cert::der::{EncodePem, pem::LineEnding};
 
 pub struct MeasurementLog(dice_verifier::Log);
@@ -95,9 +92,6 @@ impl From<Attestation> for SaRotTypes::Attestation {
 
 #[derive(Debug, Error)]
 pub enum RotError {
-    #[error("failed to create IPCC attestor: {0}")]
-    AttestIpcc(#[from] dice_verifier::ipcc::IpccError),
-
     #[error("failed to create mock attestor: {0}")]
     AttestMock(#[from] mock::AttestMockError),
 
@@ -106,27 +100,12 @@ pub enum RotError {
 
     #[error("RoT attestation queue full")]
     Busy,
-
-    #[error("RoT attestation task gone - request cancelled")]
-    Shutdown,
-}
-
-impl From<TrySendError<AttestationMessage>> for RotError {
-    fn from(e: TrySendError<AttestationMessage>) -> Self {
-        match e {
-            // Given the relatively large queue size, we always attempt to
-            // send the attestation messages via `try_send()` instead of
-            // potentially blocking forever.
-            TrySendError::Full(_) => RotError::Busy,
-            TrySendError::Closed(_) => RotError::Shutdown,
-        }
-    }
 }
 
 impl From<RotError> for HttpError {
     fn from(e: RotError) -> Self {
         match e {
-            RotError::Busy | RotError::Shutdown => HttpError::for_unavail(
+            RotError::Busy => HttpError::for_unavail(
                 None,
                 InlineErrorChain::new(&e).to_string(),
             ),
@@ -137,90 +116,41 @@ impl From<RotError> for HttpError {
     }
 }
 
-/// Depth of the request queue for Sled Agent to the RoT.
+/// Maximum number of outstanding (in-flight or waiting) RoT requests.
 const QUEUE_SIZE: usize = 256;
-
-type AttestationResponseTx<T> = oneshot::Sender<Result<T, AttestError>>;
-
-enum AttestationMessage {
-    GetMeasurementLog(AttestationResponseTx<MeasurementLog>),
-    GetCertificateChain(AttestationResponseTx<CertificateChain>),
-    Attest(Nonce, AttestationResponseTx<Attestation>),
-}
-
-#[derive(Debug)]
-pub struct RotAttestationHandle {
-    tx: mpsc::Sender<AttestationMessage>,
-}
-
-impl RotAttestationHandle {
-    pub async fn get_measurement_log(
-        &self,
-    ) -> Result<MeasurementLog, RotError> {
-        let (tx, rx) = oneshot::channel();
-        self.tx.try_send(AttestationMessage::GetMeasurementLog(tx))?;
-        Ok(rx.await.map_err(|_| RotError::Shutdown)??)
-    }
-
-    pub async fn get_certificate_chain(
-        &self,
-    ) -> Result<CertificateChain, RotError> {
-        let (tx, rx) = oneshot::channel();
-        self.tx.try_send(AttestationMessage::GetCertificateChain(tx))?;
-        Ok(rx.await.map_err(|_| RotError::Shutdown)??)
-    }
-
-    pub async fn attest(&self, nonce: Nonce) -> Result<Attestation, RotError> {
-        let (tx, rx) = oneshot::channel();
-        self.tx.try_send(AttestationMessage::Attest(nonce, tx))?;
-        Ok(rx.await.map_err(|_| RotError::Shutdown)??)
-    }
-}
 
 /// Mediates access to the Oxide RoT on the current sled.
 ///
-/// The semantics are:
-///  1. Attestation requests (on a real sled) are proxied through a few layers:
-///     Sled Agent ([`RotAttestationTask`]) <--(via IPCC)--> SP <-> RoT.
-///     Those IPCC calls are made via an IOCTL (via [`ipcc::AttestIpcc`]) and
-///     thus should be treated as "blocking I/O".
-///  2. There is only a single outstanding attestation request at any point.
-///  3. (1) + (2) leads us to service requests (via [`RotAttestationHandle`])
-///     from a single queue which is drained by a task started via
-///     `spawn_blocking()` -- [`RotAttestationTask::run`].
-pub struct RotAttestationTask {
+/// Attestation requests (on a real sled) are proxied through a few layers:
+/// Sled Agent ([`RotAttestor`]) <--(via IPCC)--> SP <-> RoT. The RoT services
+/// a single attestation request at a time, so we serialize requests here
+/// rather than having concurrent callers contend for IPCC.
+///
+/// At most [`QUEUE_SIZE`] requests may be outstanding at once. Requests made
+/// beyond that limit fail immediately with [`RotError::Busy`] rather than
+/// waiting indefinitely.
+pub struct RotAttestor {
     log: Logger,
-    rx: mpsc::Receiver<AttestationMessage>,
-    attest: Box<dyn Attest + Send>,
+    queue: Semaphore,
+    attest: Mutex<Box<dyn Attest + Send + Sync>>,
 }
 
-impl RotAttestationTask {
-    /// Creates and launches the RoT Attestation task with the given config.
-    /// On success, a handle is returned to use for submitting attestation
-    /// requests.
-    pub fn launch(
+impl RotAttestor {
+    /// Creates a new RoT attestor with the given config.
+    pub fn new(
         log: &Logger,
         attest_config: &AttestConfig,
-    ) -> Result<RotAttestationHandle, RotError> {
-        let (task, handle) = Self::new(log, attest_config)?;
-        tokio::task::spawn_blocking(move || task.run());
-        Ok(handle)
-    }
-
-    fn new(
-        log: &Logger,
-        attest_config: &AttestConfig,
-    ) -> Result<(RotAttestationTask, RotAttestationHandle), RotError> {
+    ) -> Result<Self, RotError> {
         let log = log.new(o!(
-            "component" => "RotAttestationTask",
+            "component" => "RotAttestor",
             "interface" => match attest_config {
                 AttestConfig::Ipcc => "ipcc",
                 AttestConfig::Local { .. } => "mock",
             }
         ));
 
-        let attest: Box<dyn Attest + Send> = match attest_config {
-            AttestConfig::Ipcc => Box::new(ipcc::AttestIpcc::new()?),
+        let attest: Box<dyn Attest + Send + Sync> = match attest_config {
+            AttestConfig::Ipcc => Box::new(ipcc::AttestIpcc::new()),
             AttestConfig::Local {
                 priv_key,
                 cert_chain,
@@ -229,46 +159,51 @@ impl RotAttestationTask {
             } => Box::new(mock::AttestMock::load(cert_chain, log, priv_key)?),
         };
 
-        let (tx, rx) = mpsc::channel(QUEUE_SIZE);
-        Ok((
-            RotAttestationTask { log, rx, attest },
-            RotAttestationHandle { tx },
-        ))
+        Ok(RotAttestor {
+            log,
+            queue: Semaphore::new(QUEUE_SIZE),
+            attest: Mutex::new(attest),
+        })
     }
 
-    /// Run the main request handler loop that processes incoming RoT
-    /// attestation requests.
-    ///
-    /// This should be run via `spawn_blocking` as we perform ipcc operations
-    /// via an ioctl and don't want to block any other tasks.
-    fn run(mut self) {
-        info!(self.log, "request loop started.");
-        loop {
-            let Some(req) = self.rx.blocking_recv() else {
-                warn!(self.log, "All senders dropped. Exiting.");
-                break;
-            };
-
-            match req {
-                AttestationMessage::GetMeasurementLog(reply_tx) => {
-                    let log = self.attest.get_measurement_log();
-                    let _ = reply_tx.send(log.map(Into::into));
-                }
-                AttestationMessage::GetCertificateChain(reply_tx) => {
-                    let chain =
-                        self.attest.get_certificates().and_then(|chain| {
-                            CertificateChain::try_from(chain)
-                                .map_err(AttestError::from)
-                        });
-                    let _ = reply_tx.send(chain);
-                }
-                AttestationMessage::Attest(nonce, reply_tx) => {
-                    let attestation = self.attest.attest(&nonce.0);
-                    let _ = reply_tx.send(attestation.map(Into::into));
-                }
-            }
-        }
+    /// Wait for exclusive access to the attestor, reserving a queue slot for
+    /// the duration of the request. Fails with [`RotError::Busy`] if the
+    /// queue is full.
+    async fn acquire(&self) -> Result<AttestGuard<'_>, RotError> {
+        let _permit = self.queue.try_acquire().map_err(|_| RotError::Busy)?;
+        let attest = self.attest.lock().await;
+        Ok(AttestGuard { _permit, attest })
     }
+
+    pub async fn get_measurement_log(
+        &self,
+    ) -> Result<MeasurementLog, RotError> {
+        let guard = self.acquire().await?;
+        debug!(self.log, "getting measurement log");
+        Ok(guard.attest.get_measurement_log().await?.into())
+    }
+
+    pub async fn get_certificate_chain(
+        &self,
+    ) -> Result<CertificateChain, RotError> {
+        let guard = self.acquire().await?;
+        debug!(self.log, "getting certificate chain");
+        let chain = guard.attest.get_certificates().await?;
+        Ok(CertificateChain::try_from(chain).map_err(AttestError::from)?)
+    }
+
+    pub async fn attest(&self, nonce: Nonce) -> Result<Attestation, RotError> {
+        let guard = self.acquire().await?;
+        debug!(self.log, "getting attestation");
+        Ok(guard.attest.attest(&nonce.0).await?.into())
+    }
+}
+
+/// Exclusive access to the attestor, along with the queue slot reserved for
+/// the request. Both are released when dropped.
+struct AttestGuard<'a> {
+    _permit: SemaphorePermit<'a>,
+    attest: MutexGuard<'a, Box<dyn Attest + Send + Sync>>,
 }
 
 #[cfg(test)]
@@ -325,49 +260,36 @@ mod tests {
         }
     }
 
-    /// Create a `RotAttestationHandle` backed by the mock RoT, writing its
-    /// data to `dir`.
-    fn mock_attestor(log: &Logger, dir: &Utf8Path) -> RotAttestationHandle {
-        RotAttestationTask::launch(log, &mock_config(dir)).unwrap()
+    /// Create a `RotAttestor` backed by the mock RoT, writing its data to
+    /// `dir`.
+    fn mock_attestor(log: &Logger, dir: &Utf8Path) -> RotAttestor {
+        RotAttestor::new(log, &mock_config(dir)).unwrap()
     }
 
     /// A mock-backed attestor whose request queue can be filled and drained
     /// on demand.
-    ///
-    /// The attestation task isn't started until the queue is drained, so
-    /// requests queued by `fill_queue` remain outstanding until then.
     struct QueueTestAttestor {
-        attestor: RotAttestationHandle,
-        task: Option<RotAttestationTask>,
-        pending: Vec<oneshot::Receiver<Result<MeasurementLog, AttestError>>>,
+        attestor: RotAttestor,
     }
 
     impl QueueTestAttestor {
         fn new(log: &Logger, dir: &Utf8Path) -> Self {
-            let (task, attestor) =
-                RotAttestationTask::new(log, &mock_config(dir)).unwrap();
-            Self { attestor, task: Some(task), pending: Vec::new() }
+            Self { attestor: mock_attestor(log, dir) }
         }
 
         /// Occupy every queue slot, as if `QUEUE_SIZE` requests were
         /// outstanding.
         fn fill_queue(&mut self) {
-            for _ in 0..QUEUE_SIZE {
-                let (tx, rx) = oneshot::channel();
-                let msg = AttestationMessage::GetMeasurementLog(tx);
-                assert!(self.attestor.tx.try_send(msg).is_ok());
-                self.pending.push(rx);
-            }
+            self.attestor
+                .queue
+                .try_acquire_many(QUEUE_SIZE as u32)
+                .unwrap()
+                .forget();
         }
 
         /// Complete the outstanding requests queued by `fill_queue`.
         async fn drain_queue(&mut self) {
-            if let Some(task) = self.task.take() {
-                tokio::task::spawn_blocking(move || task.run());
-            }
-            for rx in self.pending.drain(..) {
-                rx.await.unwrap().unwrap();
-            }
+            self.attestor.queue.add_permits(QUEUE_SIZE);
         }
     }
 
