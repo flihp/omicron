@@ -7,7 +7,7 @@
       "url": "https://oxide.computer",
       "email": "api@oxide.computer"
     },
-    "version": "54.0.0"
+    "version": "55.0.0"
   },
   "paths": {
     "/artifacts": {
@@ -3150,7 +3150,7 @@
         ]
       },
       "Attestation": {
-        "description": "An RoT produced attestation that represents a signature over the provided [`Nonce`] combined with the [`MeasurementLog`] and signed by a key certified by the [`CertificateChain`].",
+        "description": "An RoT produced attestation that represents a signature over the provided [`Nonce`] combined with the [`MeasurementLog`] (if the RoT provides one) and signed by a key certified by the [`CertificateChain`].",
         "oneOf": [
           {
             "description": "An Ed25519 signature.",
@@ -3163,6 +3163,27 @@
             },
             "required": [
               "ed25519"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "description": "A P-384 ECDSA signature.",
+            "type": "object",
+            "properties": {
+              "p384": {
+                "x-rust-type": {
+                  "crate": "byte-wrapper",
+                  "path": "byte_wrapper::HexArray::<96>",
+                  "version": "0.1.0"
+                },
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{192}$",
+                "minLength": 192,
+                "maxLength": 192
+              }
+            },
+            "required": [
+              "p384"
             ],
             "additionalProperties": false
           }
@@ -7498,8 +7519,27 @@
         "anyOf": [
           {
             "description": "A 32-byte nonce.",
+            "x-rust-type": {
+              "crate": "byte-wrapper",
+              "path": "byte_wrapper::HexArray::<32>",
+              "version": "0.1.0"
+            },
             "type": "string",
-            "format": "hex string (32 bytes)"
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          {
+            "description": "A 48-byte nonce.",
+            "x-rust-type": {
+              "crate": "byte-wrapper",
+              "path": "byte_wrapper::HexArray::<48>",
+              "version": "0.1.0"
+            },
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{96}$",
+            "minLength": 96,
+            "maxLength": 96
           }
         ]
       },
@@ -11195,6 +11235,13 @@
             "type": "string",
             "enum": [
               "oxide"
+            ]
+          },
+          {
+            "description": "The RoT implemented by the Helios OS using the host CPU's DICE Protection Environment (DPE).",
+            "type": "string",
+            "enum": [
+              "helios"
             ]
           }
         ]

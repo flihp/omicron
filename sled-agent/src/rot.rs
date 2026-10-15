@@ -2,9 +2,13 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Mechanisms for interacting with the sled's RoT.
+//! Mechanisms for interacting with the sled's RoTs.
 
+use crate::config::HeliosRotConfig;
 use dropshot::HttpError;
+use helios_rot::{
+    HeliosOsRot, HeliosOsRotError, HeliosRot, HeliosRotMock, HeliosRotMockError,
+};
 use oxide_rot::{Attest, AttestError, ipcc, mock};
 use sled_agent_types::rot as SaRotTypes;
 use slog::Logger;
@@ -12,6 +16,7 @@ use slog_error_chain::InlineErrorChain;
 use sprockets_tls::keys::AttestConfig;
 use thiserror::Error;
 use tokio::sync::{Mutex, MutexGuard, Semaphore, SemaphorePermit};
+use x509_cert::PkiPath;
 use x509_cert::der::{EncodePem, pem::LineEnding};
 
 pub struct MeasurementLog(oxide_rot::Log);
@@ -58,33 +63,67 @@ impl From<CertificateChain> for SaRotTypes::CertificateChain {
     }
 }
 
-pub struct Nonce(oxide_rot::Nonce);
+/// A nonce from the API. Each RoT accepts only nonces of a particular length,
+/// so the conversion to the RoT's nonce type happens once the target RoT is
+/// known.
+pub struct Nonce(SaRotTypes::Nonce);
 
 impl From<SaRotTypes::Nonce> for Nonce {
     fn from(nonce: SaRotTypes::Nonce) -> Self {
-        match nonce {
+        Nonce(nonce)
+    }
+}
+
+impl Nonce {
+    fn len(&self) -> usize {
+        match &self.0 {
+            SaRotTypes::Nonce::N32(n) => n.len(),
+            SaRotTypes::Nonce::N48(n) => n.len(),
+        }
+    }
+
+    fn into_oxide(self) -> Result<oxide_rot::Nonce, RotError> {
+        match self.0 {
             SaRotTypes::Nonce::N32(n32) => {
-                Nonce(oxide_rot::Nonce::N32(n32.into()))
+                Ok(oxide_rot::Nonce::N32(n32.into()))
             }
+            SaRotTypes::Nonce::N48(_) => Err(RotError::NonceLength {
+                rot: "Oxide",
+                expected: 32,
+                actual: self.len(),
+            }),
+        }
+    }
+
+    fn into_helios(self) -> Result<helios_rot::Nonce, RotError> {
+        match self.0 {
+            SaRotTypes::Nonce::N48(n48) => {
+                Ok(helios_rot::Nonce::N48(helios_rot::Array(n48)))
+            }
+            SaRotTypes::Nonce::N32(_) => Err(RotError::NonceLength {
+                rot: "Helios",
+                expected: helios_rot::Nonce48::LENGTH,
+                actual: self.len(),
+            }),
         }
     }
 }
 
-pub struct Attestation(oxide_rot::Attestation);
-
-impl From<oxide_rot::Attestation> for Attestation {
-    fn from(att: oxide_rot::Attestation) -> Self {
-        Attestation(att)
-    }
+pub enum Attestation {
+    Oxide(oxide_rot::Attestation),
+    Helios(helios_rot::Attestation),
 }
 
 impl From<Attestation> for SaRotTypes::Attestation {
     fn from(att: Attestation) -> Self {
-        match att.0 {
-            oxide_rot::Attestation::Ed25519(sig) => {
+        match att {
+            Attestation::Oxide(oxide_rot::Attestation::Ed25519(sig)) => {
                 SaRotTypes::Attestation::Ed25519(SaRotTypes::Ed25519Signature(
                     sig.0,
                 ))
+            }
+            Attestation::Helios(helios_rot::Attestation::P384(sig)) => {
+                SaRotTypes::Attestation::P384(SaRotTypes::P384Signature(sig.0))
             }
         }
     }
@@ -98,6 +137,21 @@ pub enum RotError {
     #[error("attestation request failed: {0}")]
     Attest(#[from] AttestError),
 
+    #[error("Helios OS RoT request failed: {0}")]
+    HeliosOsRot(#[from] HeliosOsRotError),
+
+    #[error("mock Helios RoT request failed: {0}")]
+    HeliosRotMock(#[from] HeliosRotMockError),
+
+    #[error("failed to encode certificate chain as PEM: {0}")]
+    CertificateEncoding(#[source] x509_cert::der::Error),
+
+    #[error("the Helios RoT does not provide a measurement log")]
+    NoMeasurementLog,
+
+    #[error("the {rot} RoT requires a {expected}-byte nonce, got {actual}")]
+    NonceLength { rot: &'static str, expected: usize, actual: usize },
+
     #[error("RoT attestation queue full")]
     Busy,
 }
@@ -109,6 +163,12 @@ impl From<RotError> for HttpError {
                 None,
                 InlineErrorChain::new(&e).to_string(),
             ),
+            RotError::NoMeasurementLog | RotError::NonceLength { .. } => {
+                HttpError::for_bad_request(
+                    None,
+                    InlineErrorChain::new(&e).to_string(),
+                )
+            }
             _ => HttpError::for_internal_error(
                 InlineErrorChain::new(&e).to_string(),
             ),
@@ -119,12 +179,65 @@ impl From<RotError> for HttpError {
 /// Maximum number of outstanding (in-flight or waiting) RoT requests.
 const QUEUE_SIZE: usize = 256;
 
-/// Mediates access to the Oxide RoT on the current sled.
+/// The RoT implementation backing a [`RotAttestor`].
+enum RotImpl {
+    Oxide(Box<dyn Attest + Send + Sync>),
+    Helios(HeliosAttest),
+}
+
+/// The Helios RoT implementations. Each implements `HeliosRot` with its own
+/// error type, so they can't share a single `dyn HeliosRot<Error = ..>` type
+/// without an error-mapping wrapper, and the os_rot device must be opened
+/// lazily anyway. We dispatch over the implementations we support instead.
+enum HeliosAttest {
+    /// The os_rot device is opened on first use (and on each use after a
+    /// failed open) so that sled-agent can start before the driver is
+    /// available, or on machines where it never will be.
+    Os(Option<HeliosOsRot>),
+    Mock(HeliosRotMock),
+}
+
+impl HeliosAttest {
+    fn os_rot(
+        os_rot: &mut Option<HeliosOsRot>,
+    ) -> Result<&HeliosOsRot, HeliosOsRotError> {
+        let rot = match os_rot.take() {
+            Some(rot) => rot,
+            None => HeliosOsRot::new()?,
+        };
+        Ok(os_rot.insert(rot))
+    }
+
+    async fn get_certificates(&mut self) -> Result<PkiPath, RotError> {
+        match self {
+            HeliosAttest::Os(os_rot) => {
+                Ok(Self::os_rot(os_rot)?.get_certificates().await?)
+            }
+            HeliosAttest::Mock(mock) => Ok(mock.get_certificates().await?),
+        }
+    }
+
+    async fn attest(
+        &mut self,
+        nonce: &helios_rot::Nonce,
+    ) -> Result<helios_rot::Attestation, RotError> {
+        match self {
+            HeliosAttest::Os(os_rot) => {
+                Ok(Self::os_rot(os_rot)?.attest(nonce).await?)
+            }
+            HeliosAttest::Mock(mock) => Ok(mock.attest(nonce).await?),
+        }
+    }
+}
+
+/// Mediates access to an RoT on the current sled.
 ///
-/// Attestation requests (on a real sled) are proxied through a few layers:
-/// Sled Agent ([`RotAttestor`]) <--(via IPCC)--> SP <-> RoT. The RoT services
-/// a single attestation request at a time, so we serialize requests here
-/// rather than having concurrent callers contend for IPCC.
+/// Attestation requests to the Oxide RoT (on a real sled) are proxied through
+/// a few layers: Sled Agent ([`RotAttestor`]) <--(via IPCC)--> SP <-> RoT.
+/// Requests to the Helios RoT go through the os_rot driver to the host CPU's
+/// DICE Protection Environment. Each RoT services a single attestation
+/// request at a time, so we serialize requests here rather than having
+/// concurrent callers contend for the underlying interface.
 ///
 /// At most [`QUEUE_SIZE`] requests may be outstanding at once. Requests made
 /// beyond that limit fail immediately with [`RotError::Busy`] rather than
@@ -132,17 +245,18 @@ const QUEUE_SIZE: usize = 256;
 pub struct RotAttestor {
     log: Logger,
     queue: Semaphore,
-    attest: Mutex<Box<dyn Attest + Send + Sync>>,
+    rot: Mutex<RotImpl>,
 }
 
 impl RotAttestor {
-    /// Creates a new RoT attestor with the given config.
-    pub fn new(
+    /// Creates a new Oxide RoT attestor with the given config.
+    pub fn new_oxide(
         log: &Logger,
         attest_config: &AttestConfig,
     ) -> Result<Self, RotError> {
         let log = log.new(o!(
             "component" => "RotAttestor",
+            "rot" => "oxide",
             "interface" => match attest_config {
                 AttestConfig::Ipcc => "ipcc",
                 AttestConfig::Local { .. } => "mock",
@@ -159,51 +273,96 @@ impl RotAttestor {
             } => Box::new(mock::AttestMock::load(cert_chain, log, priv_key)?),
         };
 
-        Ok(RotAttestor {
-            log,
-            queue: Semaphore::new(QUEUE_SIZE),
-            attest: Mutex::new(attest),
-        })
+        Ok(Self::new(log, RotImpl::Oxide(attest)))
     }
 
-    /// Wait for exclusive access to the attestor, reserving a queue slot for
-    /// the duration of the request. Fails with [`RotError::Busy`] if the
-    /// queue is full.
-    async fn acquire(&self) -> Result<AttestGuard<'_>, RotError> {
+    /// Creates a new Helios RoT attestor with the given config.
+    pub fn new_helios(
+        log: &Logger,
+        config: &HeliosRotConfig,
+    ) -> Result<Self, RotError> {
+        let log = log.new(o!(
+            "component" => "RotAttestor",
+            "rot" => "helios",
+            "interface" => match config {
+                HeliosRotConfig::OsRot => "os_rot",
+                HeliosRotConfig::Local { .. } => "mock",
+            }
+        ));
+
+        let attest = match config {
+            HeliosRotConfig::OsRot => HeliosAttest::Os(None),
+            HeliosRotConfig::Local { priv_key, cert_chain } => {
+                HeliosAttest::Mock(HeliosRotMock::load(cert_chain, priv_key)?)
+            }
+        };
+
+        Ok(Self::new(log, RotImpl::Helios(attest)))
+    }
+
+    fn new(log: Logger, rot: RotImpl) -> Self {
+        RotAttestor {
+            log,
+            queue: Semaphore::new(QUEUE_SIZE),
+            rot: Mutex::new(rot),
+        }
+    }
+
+    /// Wait for exclusive access to the RoT, reserving a queue slot for the
+    /// duration of the request. Fails with [`RotError::Busy`] if the queue is
+    /// full.
+    async fn acquire(&self) -> Result<RotGuard<'_>, RotError> {
         let _permit = self.queue.try_acquire().map_err(|_| RotError::Busy)?;
-        let attest = self.attest.lock().await;
-        Ok(AttestGuard { _permit, attest })
+        let rot = self.rot.lock().await;
+        Ok(RotGuard { _permit, rot })
     }
 
     pub async fn get_measurement_log(
         &self,
     ) -> Result<MeasurementLog, RotError> {
-        let guard = self.acquire().await?;
+        let mut guard = self.acquire().await?;
         debug!(self.log, "getting measurement log");
-        Ok(guard.attest.get_measurement_log().await?.into())
+        match &mut *guard.rot {
+            RotImpl::Oxide(attest) => {
+                Ok(attest.get_measurement_log().await?.into())
+            }
+            RotImpl::Helios(_) => Err(RotError::NoMeasurementLog),
+        }
     }
 
     pub async fn get_certificate_chain(
         &self,
     ) -> Result<CertificateChain, RotError> {
-        let guard = self.acquire().await?;
+        let mut guard = self.acquire().await?;
         debug!(self.log, "getting certificate chain");
-        let chain = guard.attest.get_certificates().await?;
-        Ok(CertificateChain::try_from(chain).map_err(AttestError::from)?)
+        let chain = match &mut *guard.rot {
+            RotImpl::Oxide(attest) => attest.get_certificates().await?,
+            RotImpl::Helios(helios) => helios.get_certificates().await?,
+        };
+        CertificateChain::try_from(chain).map_err(RotError::CertificateEncoding)
     }
 
     pub async fn attest(&self, nonce: Nonce) -> Result<Attestation, RotError> {
-        let guard = self.acquire().await?;
+        let mut guard = self.acquire().await?;
         debug!(self.log, "getting attestation");
-        Ok(guard.attest.attest(&nonce.0).await?.into())
+        match &mut *guard.rot {
+            RotImpl::Oxide(attest) => {
+                let nonce = nonce.into_oxide()?;
+                Ok(Attestation::Oxide(attest.attest(&nonce).await?))
+            }
+            RotImpl::Helios(helios) => {
+                let nonce = nonce.into_helios()?;
+                Ok(Attestation::Helios(helios.attest(&nonce).await?))
+            }
+        }
     }
 }
 
-/// Exclusive access to the attestor, along with the queue slot reserved for
-/// the request. Both are released when dropped.
-struct AttestGuard<'a> {
+/// Exclusive access to the RoT, along with the queue slot reserved for the
+/// request. Both are released when dropped.
+struct RotGuard<'a> {
     _permit: SemaphorePermit<'a>,
-    attest: MutexGuard<'a, Box<dyn Attest + Send + Sync>>,
+    rot: MutexGuard<'a, RotImpl>,
 }
 
 #[cfg(test)]
@@ -212,6 +371,7 @@ mod tests {
     use attest_mock::MockData;
     use camino::Utf8Path;
     use camino_tempfile::Utf8TempDir;
+    use dice_verifier::helios_rot::verify_attestation as verify_helios;
     use dice_verifier::oxide_rot::verify_attestation;
     use omicron_test_utils::dev::test_setup_log;
     use sprockets_tls_test_utils::{
@@ -263,7 +423,28 @@ mod tests {
     /// Create a `RotAttestor` backed by the mock RoT, writing its data to
     /// `dir`.
     fn mock_attestor(log: &Logger, dir: &Utf8Path) -> RotAttestor {
-        RotAttestor::new(log, &mock_config(dir)).unwrap()
+        RotAttestor::new_oxide(log, &mock_config(dir)).unwrap()
+    }
+
+    /// Write a self-signed P-384 alias cert and its key to `dir` and return a
+    /// config for the mock Helios RoT that uses them.
+    fn helios_mock_config(dir: &Utf8Path) -> HeliosRotConfig {
+        let mut params = rcgen::CertificateParams::new(vec![]);
+        params.alg = &rcgen::PKCS_ECDSA_P384_SHA384;
+        let cert = rcgen::Certificate::from_params(params).unwrap();
+
+        let cert_chain = dir.join("helios-alias.certlist.pem");
+        let priv_key = dir.join("helios-alias.key.pem");
+        std::fs::write(&cert_chain, cert.serialize_pem().unwrap()).unwrap();
+        std::fs::write(&priv_key, cert.serialize_private_key_pem()).unwrap();
+
+        HeliosRotConfig::Local { priv_key, cert_chain }
+    }
+
+    /// Create a `RotAttestor` backed by the mock Helios RoT, writing its data
+    /// to `dir`.
+    fn helios_mock_attestor(log: &Logger, dir: &Utf8Path) -> RotAttestor {
+        RotAttestor::new_helios(log, &helios_mock_config(dir)).unwrap()
     }
 
     /// A mock-backed attestor whose request queue can be filled and drained
@@ -301,14 +482,25 @@ mod tests {
 
         let log = attestor.get_measurement_log().await.unwrap();
         let chain = attestor.get_certificate_chain().await.unwrap();
-        let nonce: Nonce = SaRotTypes::Nonce::N32([7u8; 32]).into();
-        let attestation = attestor.attest(Nonce(nonce.0)).await.unwrap();
+        let nonce = [7u8; 32];
+        let attestation = attestor
+            .attest(SaRotTypes::Nonce::N32(nonce).into())
+            .await
+            .unwrap();
 
         // The first cert in the chain is the leaf: the alias cert whose key
         // signed the attestation.
         let alias = Certificate::from_pem(&chain.0[0]).unwrap();
-        verify_attestation(&alias, &attestation.0, &log.0, &nonce.0)
-            .expect("attestation should verify against the alias cert");
+        let Attestation::Oxide(oxide_attestation) = &attestation else {
+            panic!("expected an Oxide RoT attestation");
+        };
+        verify_attestation(
+            &alias,
+            oxide_attestation,
+            &log.0,
+            &oxide_rot::Nonce::N32(nonce.into()),
+        )
+        .expect("attestation should verify against the alias cert");
 
         let log: SaRotTypes::MeasurementLog = log.into();
         assert_eq!(log.0.len(), 1);
@@ -324,7 +516,9 @@ mod tests {
                 .all(|c| c.starts_with("-----BEGIN CERTIFICATE-----"))
         );
 
-        let SaRotTypes::Attestation::Ed25519(sig) = attestation.into();
+        let SaRotTypes::Attestation::Ed25519(sig) = attestation.into() else {
+            panic!("expected an Ed25519 attestation");
+        };
         assert_eq!(sig.0.len(), 64);
 
         logctx.cleanup_successful();
@@ -362,6 +556,112 @@ mod tests {
         // Once the outstanding requests complete, new ones succeed.
         rot.drain_queue().await;
         rot.attestor.get_measurement_log().await.unwrap();
+
+        logctx.cleanup_successful();
+    }
+
+    #[tokio::test]
+    async fn rot_attestor_oxide_rejects_n48() {
+        let logctx = test_setup_log("rot_attestor_oxide_rejects_n48");
+        let tmp = Utf8TempDir::new().unwrap();
+        let attestor = mock_attestor(&logctx.log, tmp.path());
+
+        let nonce: Nonce = SaRotTypes::Nonce::N48([7u8; 48]).into();
+        let err = attestor.attest(nonce).await.err().unwrap();
+        assert!(matches!(
+            err,
+            RotError::NonceLength { expected: 32, actual: 48, .. }
+        ));
+        let err: HttpError = err.into();
+        assert_eq!(err.status_code.as_status(), http::StatusCode::BAD_REQUEST);
+
+        logctx.cleanup_successful();
+    }
+
+    #[tokio::test]
+    async fn rot_attestor_helios_mock() {
+        let logctx = test_setup_log("rot_attestor_helios_mock");
+        let tmp = Utf8TempDir::new().unwrap();
+        let attestor = helios_mock_attestor(&logctx.log, tmp.path());
+
+        let chain = attestor.get_certificate_chain().await.unwrap();
+        let nonce = [7u8; 48];
+        let attestation = attestor
+            .attest(SaRotTypes::Nonce::N48(nonce).into())
+            .await
+            .unwrap();
+
+        let alias = Certificate::from_pem(&chain.0[0]).unwrap();
+        let Attestation::Helios(helios_attestation) = &attestation else {
+            panic!("expected a Helios RoT attestation");
+        };
+        verify_helios(
+            &alias,
+            helios_attestation,
+            &helios_rot::Nonce::N48(helios_rot::Array(nonce)),
+        )
+        .expect("attestation should verify against the alias cert");
+
+        let chain: SaRotTypes::CertificateChain = chain.into();
+        assert_eq!(chain.0.len(), 1);
+        assert!(chain.0[0].starts_with("-----BEGIN CERTIFICATE-----"));
+
+        let SaRotTypes::Attestation::P384(sig) = attestation.into() else {
+            panic!("expected a P-384 attestation");
+        };
+        assert_eq!(sig.0.len(), 96);
+
+        logctx.cleanup_successful();
+    }
+
+    #[tokio::test]
+    async fn rot_attestor_helios_bad_requests() {
+        let logctx = test_setup_log("rot_attestor_helios_bad_requests");
+        let tmp = Utf8TempDir::new().unwrap();
+        let attestor = helios_mock_attestor(&logctx.log, tmp.path());
+
+        // The Helios RoT has no measurement log.
+        let err = attestor.get_measurement_log().await.err().unwrap();
+        assert!(matches!(err, RotError::NoMeasurementLog));
+        let err: HttpError = err.into();
+        assert_eq!(err.status_code.as_status(), http::StatusCode::BAD_REQUEST);
+
+        // And it only accepts 48-byte nonces.
+        let nonce: Nonce = SaRotTypes::Nonce::N32([7u8; 32]).into();
+        let err = attestor.attest(nonce).await.err().unwrap();
+        assert!(matches!(
+            err,
+            RotError::NonceLength { expected: 48, actual: 32, .. }
+        ));
+        let err: HttpError = err.into();
+        assert_eq!(err.status_code.as_status(), http::StatusCode::BAD_REQUEST);
+
+        logctx.cleanup_successful();
+    }
+
+    #[tokio::test]
+    async fn rot_attestor_helios_os_rot_lazy_open() {
+        // This test needs a machine without the os_rot driver.
+        if Utf8Path::new("/dev/os_rot").exists() {
+            return;
+        }
+
+        let logctx = test_setup_log("rot_attestor_helios_os_rot_lazy_open");
+
+        // Creating the attestor doesn't touch the device...
+        let attestor =
+            RotAttestor::new_helios(&logctx.log, &HeliosRotConfig::OsRot)
+                .unwrap();
+
+        // ... but requests that need it fail, and are reported as internal
+        // errors.
+        let err = attestor.get_certificate_chain().await.err().unwrap();
+        assert!(matches!(err, RotError::HeliosOsRot(_)));
+        let err: HttpError = err.into();
+        assert_eq!(
+            err.status_code.as_status(),
+            http::StatusCode::INTERNAL_SERVER_ERROR
+        );
 
         logctx.cleanup_successful();
     }

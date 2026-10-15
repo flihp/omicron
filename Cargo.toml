@@ -571,6 +571,7 @@ glob = "0.3.2"
 guppy = "0.17.20"
 headers = "0.4.1"
 heck = "0.5"
+helios-rot = { git = "https://github.com/oxidecomputer/helios-rot", rev = "020eb50ba6ddc92cf059b35e989da7bd19769749" }
 hex = "0.4.3"
 hex-literal = "0.4.1"
 hickory-client = "0.25.2"

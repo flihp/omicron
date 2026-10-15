@@ -17,8 +17,9 @@ use omicron_common::api::internal::shared::{
     SledIdentifiers, VirtualNetworkInterfaceHost,
 };
 use sled_agent_types_versions::{
-    latest, v1, v11, v14, v18, v20, v22, v24, v25, v26, v28, v29, v30, v31,
-    v32, v33, v34, v37, v39, v40, v41, v42, v43, v46, v47, v48, v49, v50, v51,
+    latest, v1, v11, v14, v18, v19, v20, v22, v24, v25, v26, v28, v29, v30,
+    v31, v32, v33, v34, v37, v39, v40, v41, v42, v43, v46, v47, v48, v49, v50,
+    v51,
 };
 use sled_diagnostics::SledDiagnosticsQueryOutput;
 use slog_error_chain::InlineErrorChain;
@@ -35,6 +36,7 @@ api_versions!([
     // |  example for the next person.
     // v
     // (next_int, IDENT),
+    (55, ADD_HELIOS_ROT),
     (54, ADD_LOG_TIME_RANGE),
     (53, ADD_INSTANCE_MANAGER_STATUS_TO_INVENTORY),
     (52, TYPED_ARTIFACT_CONFIG_GENERATION),
@@ -1591,30 +1593,94 @@ pub trait SledAgentApi {
     #[endpoint {
         method = GET,
         path = "/rot/{rot}/measurement-log",
+        versions = VERSION_ADD_HELIOS_ROT..,
     }]
     async fn rot_measurement_log(
         request_context: RequestContext<Self::Context>,
         path_params: Path<latest::rot::RotPathParams>,
     ) -> Result<HttpResponseOk<latest::rot::MeasurementLog>, HttpError>;
 
+    /// Return the set of measurments recorded by the RoT.
+    #[endpoint {
+        operation_id = "rot_measurement_log",
+        method = GET,
+        path = "/rot/{rot}/measurement-log",
+        versions = ..VERSION_ADD_HELIOS_ROT,
+    }]
+    async fn rot_measurement_log_v19(
+        request_context: RequestContext<Self::Context>,
+        path_params: Path<v19::attestation::RotPathParams>,
+    ) -> Result<HttpResponseOk<v19::attestation::MeasurementLog>, HttpError>
+    {
+        Self::rot_measurement_log(request_context, path_params.map(Into::into))
+            .await
+    }
+
     /// Return the certificate chain for the attestation signer from the RoT.
     #[endpoint {
         method = GET,
         path = "/rot/{rot}/certificate-chain",
+        versions = VERSION_ADD_HELIOS_ROT..,
     }]
     async fn rot_certificate_chain(
         request_context: RequestContext<Self::Context>,
         path_params: Path<latest::rot::RotPathParams>,
     ) -> Result<HttpResponseOk<latest::rot::CertificateChain>, HttpError>;
 
+    /// Return the certificate chain for the attestation signer from the RoT.
+    #[endpoint {
+        operation_id = "rot_certificate_chain",
+        method = GET,
+        path = "/rot/{rot}/certificate-chain",
+        versions = ..VERSION_ADD_HELIOS_ROT,
+    }]
+    async fn rot_certificate_chain_v19(
+        request_context: RequestContext<Self::Context>,
+        path_params: Path<v19::attestation::RotPathParams>,
+    ) -> Result<HttpResponseOk<v19::attestation::CertificateChain>, HttpError>
+    {
+        Self::rot_certificate_chain(
+            request_context,
+            path_params.map(Into::into),
+        )
+        .await
+    }
+
     /// Return attestation over recorded measurments and nonce from the RoT.
     #[endpoint {
         method = POST,
         path = "/rot/{rot}/attest",
+        versions = VERSION_ADD_HELIOS_ROT..,
     }]
     async fn rot_attest(
         request_context: RequestContext<Self::Context>,
         path_params: Path<latest::rot::RotPathParams>,
         body: TypedBody<latest::rot::Nonce>,
     ) -> Result<HttpResponseOk<latest::rot::Attestation>, HttpError>;
+
+    /// Return attestation over recorded measurments and nonce from the RoT.
+    #[endpoint {
+        operation_id = "rot_attest",
+        method = POST,
+        path = "/rot/{rot}/attest",
+        versions = ..VERSION_ADD_HELIOS_ROT,
+    }]
+    async fn rot_attest_v19(
+        request_context: RequestContext<Self::Context>,
+        path_params: Path<v19::attestation::RotPathParams>,
+        body: TypedBody<v19::attestation::Nonce>,
+    ) -> Result<HttpResponseOk<v19::attestation::Attestation>, HttpError> {
+        Self::rot_attest(
+            request_context,
+            path_params.map(Into::into),
+            body.map(Into::into),
+        )
+        .await?
+        .try_map(TryFrom::try_from)
+        .map_err(|err| {
+            HttpError::for_internal_error(
+                InlineErrorChain::new(&err).to_string(),
+            )
+        })
+    }
 }
