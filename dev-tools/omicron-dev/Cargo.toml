@@ -12,7 +12,9 @@ omicron-rpaths.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+attest-mock.workspace = true
 camino.workspace = true
+camino-tempfile.workspace = true
 clap.workspace = true
 dropshot.workspace = true
 futures.workspace = true
@@ -28,6 +30,7 @@ oxide-tokio-rt.workspace = true
 # See omicron-rpaths for more about the "pq-sys" dependency.
 pq-sys = "*"
 signal-hook-tokio.workspace = true
+sprockets-tls-test-utils.workspace = true
 tokio.workspace = true
 toml.workspace = true
 

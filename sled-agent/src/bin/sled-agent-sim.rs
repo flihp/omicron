@@ -15,8 +15,8 @@ use omicron_common::cmd::CmdError;
 use omicron_common::cmd::fatal;
 use omicron_sled_agent::sim::RssArgs;
 use omicron_sled_agent::sim::{
-    Config, ConfigHardware, ConfigStorage, ConfigZpool, SimMode, ZpoolConfig,
-    run_standalone_server,
+    Config, ConfigHardware, ConfigRot, ConfigStorage, ConfigZpool, SimMode,
+    ZpoolConfig, run_standalone_server,
 };
 use omicron_uuid_kinds::SledUuid;
 use sled_agent_types::inventory::ZpoolHealth;
@@ -85,6 +85,22 @@ struct Args {
     /// agent initializes the rack, the specified certificate and private keys
     /// will be provided for the initial TLS certificates for the recovery silo.
     rss_tls_key: Option<Utf8PathBuf>,
+
+    #[clap(long, name = "ROT_PRIV_KEY_PEM_FILE", action)]
+    /// If this flag, ROT_CERT_CHAIN_PEM_FILE, and ROT_MEASUREMENT_LOG_FILE are
+    /// specified, the simulated sled agent will serve the RoT API using a mock
+    /// RoT that signs attestations with this private key.
+    rot_priv_key: Option<Utf8PathBuf>,
+
+    #[clap(long, name = "ROT_CERT_CHAIN_PEM_FILE", action)]
+    /// The certificate chain (leaf first) for the mock RoT's private key.  See
+    /// ROT_PRIV_KEY_PEM_FILE.
+    rot_cert_chain: Option<Utf8PathBuf>,
+
+    #[clap(long, name = "ROT_MEASUREMENT_LOG_FILE", action)]
+    /// The measurement log reported by the mock RoT.  See
+    /// ROT_PRIV_KEY_PEM_FILE.
+    rot_measurement_log: Option<Utf8PathBuf>,
 }
 
 fn main() {
@@ -95,6 +111,23 @@ fn main() {
 
 async fn do_run() -> Result<(), CmdError> {
     let args = Args::parse();
+
+    let rot = match (
+        args.rot_priv_key,
+        args.rot_cert_chain,
+        args.rot_measurement_log,
+    ) {
+        (None, None, None) => None,
+        (Some(priv_key), Some(cert_chain), Some(log)) => {
+            Some(ConfigRot { priv_key, cert_chain, log })
+        }
+        _ => {
+            return Err(CmdError::Usage(String::from(
+                "--rot-priv-key, --rot-cert-chain, and --rot-measurement-log \
+                must be specified together",
+            )));
+        }
+    };
 
     let config = Config {
         dropshot: ConfigDropshot {
@@ -123,6 +156,7 @@ async fn do_run() -> Result<(), CmdError> {
                 revision: 3,
             },
         },
+        rot,
         ..Config::for_testing(
             args.uuid,
             args.sim_mode,

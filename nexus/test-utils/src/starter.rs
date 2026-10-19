@@ -191,6 +191,10 @@ pub struct ControlPlaneStarter<'a, N: NexusServer> {
 
     pub simulated_upstairs: Arc<sim::SimulatedUpstairs>,
 
+    /// Mock RoT configuration given to each sled agent started by this
+    /// starter. If `None`, the sled agents do not serve the RoT API.
+    pub sim_rot: Option<sim::ConfigRot>,
+
     debug_dropbox_dir: TestTempDir,
 }
 
@@ -247,6 +251,7 @@ impl<'a, N: NexusServer> ControlPlaneStarter<'a, N> {
             simulated_upstairs: Arc::new(sim::SimulatedUpstairs::new(
                 simulated_upstairs_log,
             )),
+            sim_rot: None,
             debug_dropbox_dir,
         }
     }
@@ -978,6 +983,7 @@ impl<'a, N: NexusServer> ControlPlaneStarter<'a, N> {
             SledCpuFamily::AmdMilan,
             sled_role,
             &self.simulated_upstairs,
+            self.sim_rot.clone(),
         )
         .await
         .expect("Failed to start sled agent");
@@ -1114,6 +1120,7 @@ impl<'a, N: NexusServer> ControlPlaneStarter<'a, N> {
             SledCpuFamily::AmdMilan,
             SledRole::Gimlet,
             &self.simulated_upstairs,
+            self.sim_rot.clone(),
         )
         .await
         .expect("Failed to start sled agent");
@@ -2067,21 +2074,25 @@ pub(crate) async fn start_sled_agent(
     cpu_family: SledCpuFamily,
     sled_role: SledRole,
     simulated_upstairs: &Arc<sim::SimulatedUpstairs>,
+    rot: Option<sim::ConfigRot>,
 ) -> Result<sim::Server, String> {
     // Generate a baseboard serial number that matches the SP configuration
     // (SimGimlet00, SimGimlet01, etc.) so that inventory can link sled agents
     // to their corresponding SPs via baseboard_id.
     let baseboard_serial = format!("SimGimlet{:02}", sled_index);
 
-    let config = sim::Config::for_testing_with_baseboard(
-        id,
-        sim_mode,
-        Some(nexus_address),
-        sim::ZpoolConfig::None,
-        cpu_family,
-        Some(baseboard_serial),
-        sled_role,
-    );
+    let config = sim::Config {
+        rot,
+        ..sim::Config::for_testing_with_baseboard(
+            id,
+            sim_mode,
+            Some(nexus_address),
+            sim::ZpoolConfig::None,
+            cpu_family,
+            Some(baseboard_serial),
+            sled_role,
+        )
+    };
     start_sled_agent_with_config(log, &config, sled_index, simulated_upstairs)
         .await
 }
