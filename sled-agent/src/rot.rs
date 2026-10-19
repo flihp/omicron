@@ -321,7 +321,7 @@ struct RotGuard<'a> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use attest_mock::MockData;
     use camino::Utf8Path;
@@ -334,7 +334,7 @@ mod tests {
     use x509_cert::{Certificate, der::DecodePem};
 
     // An arbitrary digest for the single measurement in the mock log.
-    const DIGEST: &str =
+    pub(crate) const DIGEST: &str =
         "be4df4e085175f3de0c8ac4837e1c2c9a34e8983209dac6b549e94154f7cdd9c";
 
     /// Write the keys, certs, and measurement log for the mock RoT to `dir`
@@ -362,8 +362,8 @@ mod tests {
         std::fs::write(dir.join("log.bin"), &log).unwrap();
     }
 
-    /// Write the mock RoT's data to `dir` and return a config that uses it
-    fn mock_config(dir: &Utf8Path) -> AttestConfig {
+    /// Write the mock RoT's data to `dir` and return a config that uses it.
+    pub(crate) fn mock_config(dir: &Utf8Path) -> AttestConfig {
         write_mock_data(dir);
 
         let alias = alias_prefix(1);

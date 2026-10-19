@@ -13,6 +13,7 @@ use super::storage::Storage;
 use crate::artifact_store::ArtifactStore;
 use crate::instance_manager::VmmRegistrationDisallowedReason;
 use crate::nexus::NexusClient;
+use crate::rot::RotAttestor;
 use crate::sim::SimulatedUpstairs;
 use crate::sim::simulatable::Simulatable;
 use crate::support_bundle::storage::SupportBundleQueryType;
@@ -68,11 +69,13 @@ use sled_agent_types::inventory::{
     InventoryZpool, OmicronFileSourceResolverInventory, OmicronSledConfig,
     OmicronSledUpdateDisposition, SingleMeasurementInventory, ZpoolHealth,
 };
+use sled_agent_types::rot::Rot;
 use sled_agent_types::support_bundle::SupportBundleMetadata;
 use sled_agent_types::system_networking::SystemNetworkingConfig;
 
 use slog::Logger;
 use slog_error_chain::InlineErrorChain;
+use sprockets_tls::keys::AttestConfig;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -131,6 +134,8 @@ pub struct SledAgent {
     network_config_tx: watch::Sender<SystemNetworkingConfig>,
     /// Keeps the scrimlet reconcilers alive.
     scrimlet_reconcilers: ScrimletReconcilers,
+    /// Mock RoT, present only if configured
+    rot_attestor: Option<RotAttestor>,
 }
 
 /// A synthetic log file injected into the simulated sled-agent by tests,
@@ -154,7 +159,7 @@ impl SledAgent {
         nexus_client: Arc<NexusClient>,
         simulated_upstairs: Arc<SimulatedUpstairs>,
         sled_index: u16,
-    ) -> Arc<SledAgent> {
+    ) -> anyhow::Result<Arc<SledAgent>> {
         let id = config.id;
         let sim_mode = config.sim_mode;
         info!(&log, "created simulated sled agent"; "sim_mode" => ?sim_mode);
@@ -214,7 +219,24 @@ impl SledAgent {
 
         let scrimlet_reconcilers = ScrimletReconcilers::new(&log);
 
-        Arc::new(SledAgent {
+        let rot_attestor = config
+            .rot
+            .as_ref()
+            .map(|rot| {
+                RotAttestor::new_oxide(
+                    &log,
+                    &AttestConfig::Local {
+                        priv_key: rot.priv_key.clone(),
+                        cert_chain: rot.cert_chain.clone(),
+                        log: rot.log.clone(),
+                        test_corpus: vec![],
+                    },
+                )
+            })
+            .transpose()
+            .context("creating mock RoT attestor")?;
+
+        Ok(Arc::new(SledAgent {
             id,
             ip: config.dropshot.bind_address.ip(),
             vmms: Arc::new(SimCollection::new(
@@ -241,7 +263,17 @@ impl SledAgent {
             support_logs: Mutex::new(HashMap::new()),
             network_config_tx,
             scrimlet_reconcilers,
-        })
+            rot_attestor,
+        }))
+    }
+
+    /// Returns the sled's mock RoT attestor, if one was configured.
+    pub(crate) fn rot_attestor(&self, rot: Rot) -> Option<&RotAttestor> {
+        // We currently only support the LPC55 RoT
+        match rot {
+            Rot::Oxide => self.rot_attestor.as_ref(),
+            Rot::Helios => None,
+        }
     }
 
     /// Injects a synthetic zone log file to be served by the support-logs

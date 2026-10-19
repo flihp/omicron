@@ -2,8 +2,10 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use anyhow::Context;
-use camino::Utf8PathBuf;
+use anyhow::{Context, anyhow};
+use attest_mock::MockData;
+use camino::{Utf8Path, Utf8PathBuf};
+use camino_tempfile::Utf8TempDir;
 use clap::{Args, Parser, Subcommand};
 use futures::StreamExt;
 use gateway_client::ClientInfo as _;
@@ -11,8 +13,12 @@ use gateway_test_utils::setup::DEFAULT_SP_SIM_CONFIG;
 use libc::SIGINT;
 use nexus_config::NexusConfig;
 use nexus_test_interface::NexusServer;
+use nexus_test_utils::SimRotConfig;
 use nexus_test_utils::resource_helpers::DiskTest;
 use signal_hook_tokio::Signals;
+use sprockets_tls_test_utils::{
+    OutputFileExistsBehavior, alias_prefix, certlist_path, private_key_path,
+};
 use std::fs;
 
 const DEFAULT_NEXUS_CONFIG: &str =
@@ -88,12 +94,23 @@ impl RunAllArgs {
                 .set_port(p);
         }
 
+        // Generate the artifacts used by the simulated sled agents' mock RoT.
+        // These must outlive the control plane, so `rot_dir` is held until
+        // the end of this function.
+        let rot_dir = Utf8TempDir::with_prefix("omicron-dev-rot-")
+            .context("creating directory for mock RoT artifacts")?;
+        let sim_rot = write_mock_rot_artifacts(rot_dir.path())
+            .context("generating mock RoT artifacts")?;
+
         println!("omicron-dev: setting up all services ... ");
-        let cptestctx = nexus_test_utils::omicron_dev_setup_with_config::<
-            omicron_nexus::Server,
-        >(&mut config, 0, self.gateway_config.clone())
-        .await
-        .context("error setting up services")?;
+        let cptestctx =
+            nexus_test_utils::omicron_dev_setup_with_config::<
+                omicron_nexus::Server,
+            >(
+                &mut config, 0, self.gateway_config.clone(), Some(sim_rot)
+            )
+            .await
+            .context("error setting up services")?;
 
         println!("omicron-dev: Adding disks to first sled agent");
 
@@ -130,6 +147,7 @@ impl RunAllArgs {
             "omicron-dev: sled agent API:         http://{:?}",
             cptestctx.sled_agents[0].local_addr(),
         );
+        println!("omicron-dev: mock RoT artifacts:     {}", rot_dir.path(),);
         println!(
             "omicron-dev: cockroachdb pid:        {}",
             cptestctx.database.pid(),
@@ -208,4 +226,45 @@ impl RunAllArgs {
         cptestctx.teardown().await;
         Ok(())
     }
+}
+
+/// An arbitrary digest for the single measurement in the mock RoT's
+/// measurement log.
+const MOCK_ROT_DIGEST: &str =
+    "be4df4e085175f3de0c8ac4837e1c2c9a34e8983209dac6b549e94154f7cdd9c";
+
+/// Write the keys, certificates, and measurement log needed by the simulated
+/// sled agents' mock RoT to `dir`, returning a config that refers to them.
+fn write_mock_rot_artifacts(dir: &Utf8Path) -> anyhow::Result<SimRotConfig> {
+    let behavior = OutputFileExistsBehavior::Overwrite;
+    let doc = sprockets_tls_test_utils::generate_config(1);
+    doc.write_key_pairs(dir.to_owned(), behavior)
+        .map_err(|e| anyhow!("writing mock RoT key pairs: {e:?}"))?;
+    doc.write_certificates(dir.to_owned(), behavior)
+        .map_err(|e| anyhow!("writing mock RoT certificates: {e:?}"))?;
+    doc.write_certificate_lists(dir.to_owned(), behavior)
+        .map_err(|e| anyhow!("writing mock RoT certificate chains: {e:?}"))?;
+
+    let log_kdl = format!(
+        r#"
+        measurement {{
+            algorithm "sha3-256"
+            digest "{MOCK_ROT_DIGEST}"
+        }}
+        "#
+    );
+    let log = attest_mock::MockLog::parse("log.kdl", &log_kdl)
+        .context("parsing mock RoT measurement log")?
+        .to_bytes()
+        .context("encoding mock RoT measurement log")?;
+    let log_path = dir.join("log.bin");
+    fs::write(&log_path, &log)
+        .with_context(|| format!("writing {log_path}"))?;
+
+    let alias = alias_prefix(1);
+    Ok(SimRotConfig {
+        priv_key: private_key_path(dir.to_owned(), &alias),
+        cert_chain: certlist_path(dir.to_owned(), &alias),
+        log: log_path,
+    })
 }

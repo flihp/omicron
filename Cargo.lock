@@ -9103,7 +9103,9 @@ name = "omicron-dev"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "attest-mock",
  "camino",
+ "camino-tempfile",
  "clap",
  "dropshot",
  "expectorate",
@@ -9124,6 +9126,7 @@ dependencies = [
  "oxide-tokio-rt",
  "pq-sys",
  "signal-hook-tokio",
+ "sprockets-tls-test-utils",
  "subprocess",
  "tokio",
  "tokio-postgres",

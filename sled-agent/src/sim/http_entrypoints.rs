@@ -1140,25 +1140,40 @@ impl SledAgentApi for SledAgentSimImpl {
     }
 
     async fn rot_measurement_log(
-        _request_context: RequestContext<Self::Context>,
-        _path_params: Path<RotPathParams>,
+        request_context: RequestContext<Self::Context>,
+        path_params: Path<RotPathParams>,
     ) -> Result<HttpResponseOk<MeasurementLog>, HttpError> {
-        method_unimplemented()
+        let sa = request_context.context();
+        let Some(rot) = sa.rot_attestor(path_params.into_inner().rot) else {
+            return method_unimplemented();
+        };
+        let log = rot.get_measurement_log().await?;
+        Ok(HttpResponseOk(log.into()))
     }
 
     async fn rot_certificate_chain(
-        _request_context: RequestContext<Self::Context>,
-        _path_params: Path<RotPathParams>,
+        request_context: RequestContext<Self::Context>,
+        path_params: Path<RotPathParams>,
     ) -> Result<HttpResponseOk<CertificateChain>, HttpError> {
-        method_unimplemented()
+        let sa = request_context.context();
+        let Some(rot) = sa.rot_attestor(path_params.into_inner().rot) else {
+            return method_unimplemented();
+        };
+        let chain = rot.get_certificate_chain().await?;
+        Ok(HttpResponseOk(chain.into()))
     }
 
     async fn rot_attest(
-        _request_context: RequestContext<Self::Context>,
-        _path_params: Path<RotPathParams>,
-        _body: TypedBody<Nonce>,
+        request_context: RequestContext<Self::Context>,
+        path_params: Path<RotPathParams>,
+        body: TypedBody<Nonce>,
     ) -> Result<HttpResponseOk<Attestation>, HttpError> {
-        method_unimplemented()
+        let sa = request_context.context();
+        let Some(rot) = sa.rot_attestor(path_params.into_inner().rot) else {
+            return method_unimplemented();
+        };
+        let attestation = rot.attest(body.into_inner().into()).await?;
+        Ok(HttpResponseOk(attestation.into()))
     }
 }
 
@@ -1220,4 +1235,117 @@ async fn instance_post_sim_migration_source(
     let id = path_params.into_inner().propolis_id;
     sa.instance_simulate_migration_source(id, body.into_inner()).await?;
     Ok(HttpResponseUpdatedNoContent())
+}
+
+#[cfg(test)]
+mod test {
+    use crate::rot::tests::{DIGEST, mock_config};
+    use crate::sim::{
+        Config, ConfigRot, NexusRegistration, Server, SimMode,
+        SimulatedUpstairs, ZpoolConfig,
+    };
+    use camino_tempfile::Utf8TempDir;
+    use dice_verifier::oxide_rot::verify_attestation;
+    use omicron_test_utils::dev::test_setup_log;
+    use omicron_uuid_kinds::SledUuid;
+    use sled_agent_types::rot::{Attestation, Measurement, Nonce, Rot};
+    use sled_hardware_types::SledCpuFamily;
+    use sprockets_tls::keys::AttestConfig;
+    use std::sync::Arc;
+    use x509_cert::{Certificate, der::DecodePem};
+
+    async fn start_server(
+        log: &slog::Logger,
+        rot: Option<ConfigRot>,
+    ) -> (Server, sled_agent_client::Client) {
+        let config = Config {
+            rot,
+            ..Config::for_testing(
+                SledUuid::new_v4(),
+                SimMode::Explicit,
+                None,
+                ZpoolConfig::None,
+                SledCpuFamily::AmdMilan,
+            )
+        };
+        let upstairs = Arc::new(SimulatedUpstairs::new(log.clone()));
+        let server = Server::start(
+            &config,
+            log,
+            NexusRegistration::Background,
+            &upstairs,
+            0,
+        )
+        .await
+        .unwrap();
+        let url = format!("http://{}", server.http_server.local_addr());
+        let client = sled_agent_client::Client::new(&url, log.clone());
+        (server, client)
+    }
+
+    #[tokio::test]
+    async fn sim_rot_mock() {
+        let logctx = test_setup_log("sim_rot_mock");
+        let tmp = Utf8TempDir::new().unwrap();
+        let AttestConfig::Local { priv_key, cert_chain, log, .. } =
+            mock_config(tmp.path())
+        else {
+            unreachable!("mock_config returns a local config");
+        };
+        let log_path = log.clone();
+        let rot = ConfigRot { priv_key, cert_chain, log };
+        let (server, client) = start_server(&logctx.log, Some(rot)).await;
+
+        let log = client.rot_measurement_log(&Rot::Oxide).await.unwrap();
+        assert_eq!(log.0.len(), 1);
+        let Measurement::Sha3_256(digest) = &log.0[0];
+        assert_eq!(hex::encode(digest.0), DIGEST);
+
+        let chain = client.rot_certificate_chain(&Rot::Oxide).await.unwrap();
+        assert!(!chain.0.is_empty());
+
+        let nonce = [7u8; 32];
+        let Attestation::Ed25519(sig) = client
+            .rot_attest(&Rot::Oxide, &Nonce::N32(nonce))
+            .await
+            .unwrap()
+            .into_inner()
+        else {
+            panic!("expected an Ed25519 attestation");
+        };
+
+        // The attestation must verify against the alias (leaf) cert, the
+        // measurement log the mock RoT was configured with, and our nonce.
+        let alias = Certificate::from_pem(&chain.0[0]).unwrap();
+        let log_bytes = std::fs::read(&log_path).unwrap();
+        let log = oxide_rot::Log::try_from(&log_bytes[..]).unwrap();
+        verify_attestation(
+            &alias,
+            &oxide_rot::Attestation::Ed25519(sig.0.into()),
+            &log,
+            &oxide_rot::Nonce::N32(nonce.into()),
+        )
+        .expect("attestation should verify against the alias cert");
+
+        drop(server);
+        logctx.cleanup_successful();
+    }
+
+    #[tokio::test]
+    async fn sim_rot_unconfigured() {
+        let logctx = test_setup_log("sim_rot_unconfigured");
+        let (server, client) = start_server(&logctx.log, None).await;
+
+        let Err(err) = client.rot_measurement_log(&Rot::Oxide).await else {
+            panic!("RoT API should be unavailable without a mock RoT");
+        };
+        assert_eq!(
+            err.status(),
+            Some(http::StatusCode::METHOD_NOT_ALLOWED),
+            "unexpected error: {err}"
+        );
+
+        drop(server);
+        logctx.cleanup_successful();
+    }
 }
