@@ -492,8 +492,11 @@ struct SledAgentInner {
     // A mechanism for notifiying nexus about sled-agent updates
     nexus_notifier: NexusNotifierHandle,
 
-    // A handle to the RoT for attestation requests.
-    rot_attestor: RotAttestor,
+    // A handle to the Oxide RoT for attestation requests.
+    oxide_rot: RotAttestor,
+
+    // A handle to the Helios RoT for attestation requests, if configured.
+    helios_rot: Option<RotAttestor>,
 
     // Object managing zone bundles.
     zone_bundler: zone_bundle::ZoneBundler,
@@ -841,7 +844,12 @@ impl SledAgent {
             nexus_notifier_task.run().await;
         });
 
-        let rot_attestor = RotAttestor::new(&log, &config.sprockets.attest)?;
+        let oxide_rot = RotAttestor::new_oxide(&log, &config.sprockets.attest)?;
+        let helios_rot = config
+            .helios_rot
+            .as_ref()
+            .map(|config| RotAttestor::new_helios(&log, config))
+            .transpose()?;
 
         let currently_managed_zpools_rx =
             config_reconciler.currently_managed_zpools_rx().clone();
@@ -866,7 +874,8 @@ impl SledAgent {
                 port_manager,
                 services,
                 nexus_notifier: nexus_notifier_handle,
-                rot_attestor,
+                oxide_rot,
+                helios_rot,
                 zone_bundler: long_running_task_handles.zone_bundler.clone(),
                 bootstore: long_running_task_handles.bootstore.clone(),
                 trust_quorum: long_running_task_handles.trust_quorum.clone(),
@@ -941,11 +950,17 @@ impl SledAgent {
         rot: Rot,
         remote_addr: SocketAddr,
     ) -> Result<&RotAttestor, HttpError> {
-        // We currently only support the LPC55 RoT
-        let Rot::Oxide = rot;
-        // And we only serve sled-local clients
+        // We only serve sled-local clients
         self.ensure_sled_local_request(remote_addr)?;
-        Ok(&self.inner.rot_attestor)
+        match rot {
+            Rot::Oxide => Ok(&self.inner.oxide_rot),
+            Rot::Helios => self.inner.helios_rot.as_ref().ok_or_else(|| {
+                HttpError::for_not_found(
+                    None,
+                    "the Helios RoT is not configured on this sled".to_string(),
+                )
+            }),
+        }
     }
 
     /// Trigger a request to Nexus informing it that the current sled exists,

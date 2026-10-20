@@ -2976,7 +2976,7 @@ dependencies = [
  "const-oid 0.9.6",
  "der 0.7.10",
  "ed25519-dalek 2.2.0",
- "helios-rot",
+ "helios-rot 0.1.0 (git+https://github.com/oxidecomputer/helios-rot?rev=020eb50ba6ddc92cf059b35e989da7bd19769749)",
  "hex",
  "hubpack",
  "p384 0.13.1",
@@ -4903,7 +4903,26 @@ dependencies = [
  "cfg-if",
  "der 0.7.10",
  "getrandom 0.4.3",
- "os-rot",
+ "os-rot 0.1.0 (git+https://github.com/oxidecomputer/helios-rot?rev=020eb50ba6ddc92cf059b35e989da7bd19769749)",
+ "p384 0.13.1",
+ "serde",
+ "serde_with 3.21.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "x509-cert",
+]
+
+[[package]]
+name = "helios-rot"
+version = "0.1.0"
+source = "git+https://github.com/flihp/helios-rot?rev=d26cbfc409c998cc3f0e0b621708612b7926eb9a#d26cbfc409c998cc3f0e0b621708612b7926eb9a"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "cfg-if",
+ "der 0.7.10",
+ "getrandom 0.4.3",
+ "os-rot 0.1.0 (git+https://github.com/flihp/helios-rot?rev=d26cbfc409c998cc3f0e0b621708612b7926eb9a)",
  "p384 0.13.1",
  "serde",
  "serde_with 3.21.0",
@@ -9862,6 +9881,7 @@ dependencies = [
  "futures",
  "glob",
  "guppy",
+ "helios-rot 0.1.0 (git+https://github.com/flihp/helios-rot?rev=d26cbfc409c998cc3f0e0b621708612b7926eb9a)",
  "hex",
  "hex-literal 0.4.1",
  "http",
@@ -9907,6 +9927,7 @@ dependencies = [
  "proptest",
  "rand 0.9.2",
  "range-requests",
+ "rcgen",
  "regress 0.10.5",
  "repo-depot-api",
  "repo-depot-client",
@@ -10390,6 +10411,15 @@ dependencies = [
 name = "os-rot"
 version = "0.1.0"
 source = "git+https://github.com/oxidecomputer/helios-rot?rev=020eb50ba6ddc92cf059b35e989da7bd19769749#020eb50ba6ddc92cf059b35e989da7bd19769749"
+dependencies = [
+ "rustix 1.1.4",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "os-rot"
+version = "0.1.0"
+source = "git+https://github.com/flihp/helios-rot?rev=d26cbfc409c998cc3f0e0b621708612b7926eb9a#d26cbfc409c998cc3f0e0b621708612b7926eb9a"
 dependencies = [
  "rustix 1.1.4",
  "thiserror 2.0.18",

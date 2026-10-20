@@ -35,6 +35,7 @@ flate2.workspace = true
 flume.workspace = true
 futures.workspace = true
 glob.workspace = true
+helios-rot.workspace = true
 hex.workspace = true
 http.workspace = true
 http-body-util.workspace = true
@@ -153,6 +154,7 @@ omicron-test-utils.workspace = true
 progenitor.workspace = true
 pretty_assertions.workspace = true
 proptest.workspace = true
+rcgen.workspace = true
 regress.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 subprocess.workspace = true
