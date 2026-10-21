@@ -15,6 +15,7 @@ use omicron_test_utils::dev::test_cmds::assert_exit_code;
 use omicron_test_utils::dev::test_cmds::path_to_executable;
 use omicron_test_utils::dev::test_cmds::run_command;
 use oxide_client::ClientConsoleAuthExt;
+use sled_agent_types::rot::Rot;
 use std::io::BufRead;
 use std::path::PathBuf;
 use subprocess::Exec;
@@ -37,6 +38,8 @@ struct RunAll {
     postgres_config: tokio_postgres::Config,
     temp_dir: PathBuf,
     external_url: String,
+    sled_agent_url: String,
+    rot_dir: PathBuf,
 }
 
 /// Like `run_db_run()`, but for the `run-all` command
@@ -53,12 +56,15 @@ fn run_run_all(exec: Exec) -> RunAll {
     let cmd_pid = subproc.pid().unwrap();
     let (mut db_pid, mut external_url, mut postgres_url, mut temp_dir) =
         (None, None, None, None);
+    let (mut sled_agent_url, mut rot_dir) = (None, None);
 
     eprintln!("waiting for stdout from child process");
     while db_pid.is_none()
         || external_url.is_none()
         || postgres_url.is_none()
         || temp_dir.is_none()
+        || sled_agent_url.is_none()
+        || rot_dir.is_none()
     {
         let mut buf = String::with_capacity(80);
         match subproc_out.read_line(&mut buf) {
@@ -84,6 +90,18 @@ fn run_run_all(exec: Exec) -> RunAll {
         if let Some(s) = buf.strip_prefix("omicron-dev: nexus external API: ") {
             eprint!("found Nexus external API: {}", s);
             external_url = Some(s.trim().to_string());
+            continue;
+        }
+
+        if let Some(s) = buf.strip_prefix("omicron-dev: sled agent API: ") {
+            eprint!("found sled agent API: {}", s);
+            sled_agent_url = Some(s.trim().to_string());
+            continue;
+        }
+
+        if let Some(s) = buf.strip_prefix("omicron-dev: mock RoT artifacts: ") {
+            eprint!("found mock RoT artifacts: {}", s);
+            rot_dir = Some(PathBuf::from(s.trim().to_string()));
             continue;
         }
 
@@ -116,6 +134,8 @@ fn run_run_all(exec: Exec) -> RunAll {
         external_url: external_url.unwrap(),
         postgres_config,
         temp_dir: temp_dir.unwrap(),
+        sled_agent_url: sled_agent_url.unwrap(),
+        rot_dir: rot_dir.unwrap(),
     }
 }
 
@@ -171,6 +191,22 @@ async fn test_run_all() {
             client.logout().send().await.context(
                 "Unexpectedly failed to reach Nexus at logout endpoint",
             )?;
+
+        // Make sure the sled agent serves the mock Oxide and Helios RoTs.
+        let client = sled_agent_client::Client::new(
+            &runall.sled_agent_url,
+            slog::Logger::root(slog::Discard, slog::o!()),
+        );
+        let chain = client
+            .rot_certificate_chain(&Rot::Oxide)
+            .await
+            .context("failed to get mock RoT certificate chain")?;
+        anyhow::ensure!(!chain.0.is_empty());
+        let chain = client
+            .rot_certificate_chain(&Rot::Helios)
+            .await
+            .context("failed to get mock Helios RoT certificate chain")?;
+        anyhow::ensure!(chain.0.len() == 1);
         Ok(())
     };
     let res = test_task.await;
@@ -194,6 +230,9 @@ async fn test_run_all() {
     );
     eprintln!("wait result: {:?}", wait);
     assert!(matches!(wait, subprocess::ExitStatus::Exited(0)));
+
+    // The mock RoTs' files are removed on exit.
+    assert!(!runall.rot_dir.exists());
 
     // Unwrap the caught errors we are actually trying to test.
     res.expect("failed to run test");

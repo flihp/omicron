@@ -13,8 +13,8 @@ use gateway_test_utils::setup::DEFAULT_SP_SIM_CONFIG;
 use libc::SIGINT;
 use nexus_config::NexusConfig;
 use nexus_test_interface::NexusServer;
-use nexus_test_utils::SimRotConfig;
 use nexus_test_utils::resource_helpers::DiskTest;
+use nexus_test_utils::{SimHeliosRotConfig, SimRotConfig};
 use signal_hook_tokio::Signals;
 use sprockets_tls_test_utils::{
     OutputFileExistsBehavior, alias_prefix, certlist_path, private_key_path,
@@ -94,23 +94,28 @@ impl RunAllArgs {
                 .set_port(p);
         }
 
-        // Generate the artifacts used by the simulated sled agents' mock RoT.
+        // Generate the artifacts used by the simulated sled agents' mock RoTs.
         // These must outlive the control plane, so `rot_dir` is held until
         // the end of this function.
         let rot_dir = Utf8TempDir::with_prefix("omicron-dev-rot-")
             .context("creating directory for mock RoT artifacts")?;
         let sim_rot = write_mock_rot_artifacts(rot_dir.path())
             .context("generating mock RoT artifacts")?;
+        let sim_helios_rot = write_mock_helios_rot_artifacts(rot_dir.path())
+            .context("generating mock Helios RoT artifacts")?;
 
         println!("omicron-dev: setting up all services ... ");
-        let cptestctx =
-            nexus_test_utils::omicron_dev_setup_with_config::<
-                omicron_nexus::Server,
-            >(
-                &mut config, 0, self.gateway_config.clone(), Some(sim_rot)
-            )
-            .await
-            .context("error setting up services")?;
+        let cptestctx = nexus_test_utils::omicron_dev_setup_with_config::<
+            omicron_nexus::Server,
+        >(
+            &mut config,
+            0,
+            self.gateway_config.clone(),
+            Some(sim_rot),
+            Some(sim_helios_rot),
+        )
+        .await
+        .context("error setting up services")?;
 
         println!("omicron-dev: Adding disks to first sled agent");
 
@@ -267,4 +272,29 @@ fn write_mock_rot_artifacts(dir: &Utf8Path) -> anyhow::Result<SimRotConfig> {
         cert_chain: certlist_path(dir.to_owned(), &alias),
         log: log_path,
     })
+}
+
+/// Write a self-signed P-384 certificate and its private key for the
+/// simulated sled agents' mock Helios RoT to `dir`, returning a config that
+/// refers to them.
+fn write_mock_helios_rot_artifacts(
+    dir: &Utf8Path,
+) -> anyhow::Result<SimHeliosRotConfig> {
+    let mut params =
+        rcgen::CertificateParams::new(vec![String::from("helios-rot-mock")]);
+    params.alg = &rcgen::PKCS_ECDSA_P384_SHA384;
+    let cert = rcgen::Certificate::from_params(params)
+        .context("generating mock Helios RoT certificate")?;
+
+    let cert_chain = dir.join("helios-rot.certlist.pem");
+    let cert_pem =
+        cert.serialize_pem().context("encoding mock Helios RoT certificate")?;
+    fs::write(&cert_chain, cert_pem)
+        .with_context(|| format!("writing {cert_chain}"))?;
+
+    let priv_key = dir.join("helios-rot.key.pem");
+    fs::write(&priv_key, cert.serialize_private_key_pem())
+        .with_context(|| format!("writing {priv_key}"))?;
+
+    Ok(SimHeliosRotConfig { priv_key, cert_chain })
 }

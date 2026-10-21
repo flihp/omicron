@@ -341,3 +341,34 @@ $ curl -i --resolve test-suite-silo.sys.oxide-dev.test:12220:127.0.0.1 --cacert 
 ----
 +
 The Oxide CLI supports identical flags.
+
+== Using the mock Helios RoT
+
+The simulated sled agent can serve the sled agent's RoT API for the Helios RoT (`/rot/helios/...`) using a mock RoT that signs attestations with a key you provide.  (It can similarly serve the Oxide RoT, `/rot/oxide/...`, using a mock configured with `sled-agent-sim`'s `--rot-priv-key`, `--rot-cert-chain`, and `--rot-measurement-log` options.)
+
+`omicron-dev run-all` sets up the mock RoTs for you.  It generates their keys and certificates (for the Helios RoT, a self-signed P-384 certificate and private key) in a temporary directory, which it prints on startup (`omicron-dev: mock RoT artifacts: ...`) and removes on exit.
+
+When running the pieces by hand, `sled-agent-sim` serves the mock Helios RoT only if you provide its key and certificate using the steps below.  Otherwise, requests for the Helios RoT fail with a 405.
+
+1. Create a PKCS#8 PEM-encoded P-384 private key and a certificate chain for it (PEM-encoded, leaf first).  A self-signed certificate is enough:
++
+[source,text]
+----
+$ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-384 -nodes \
+    -subj "/CN=helios-rot-mock" -days 365 \
+    -keyout helios-rot.key.pem -out helios-rot.certlist.pem
+----
+2. When you run `sled-agent-sim`, pass the `--helios-rot-priv-key` and `--helios-rot-cert-chain` options as well, referring to the files created above.  The two options must be specified together.
++
+[source,text]
+----
+$ cargo run --bin=sled-agent-sim -- ... --helios-rot-priv-key helios-rot.key.pem --helios-rot-cert-chain helios-rot.certlist.pem
+----
+3. The mock RoT can now be queried through the sled agent API.  Requests must include an `api-version` header.  The Helios RoT accepts only 48-byte nonces, and it does not provide a measurement log (requests for one fail with a 400):
++
+[source,text]
+----
+$ curl -H 'api-version: 55.0.0' 'http://[::1]:12345/rot/helios/certificate-chain'
+$ curl -H 'api-version: 55.0.0' -H 'content-type: application/json' \
+    -d "\"$(openssl rand -hex 48)\"" 'http://[::1]:12345/rot/helios/attest'
+----

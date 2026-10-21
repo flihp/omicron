@@ -344,6 +344,7 @@ impl<N: NexusServer> ControlPlaneTestContext<N> {
             SledRole::Gimlet,
             &self.first_sled_agent().simulated_upstairs,
             None,
+            None,
         )
         .await
         .expect("started simulated sled agent");
@@ -670,17 +671,20 @@ pub fn load_test_config() -> NexusConfig {
 /// exists (or creates a seed tarball if it doesn't exist). For tests, this
 /// should be done in the `crdb-seed` setup script.
 ///
-/// If `sim_rot` is provided, each simulated sled agent serves the RoT API
-/// using a mock RoT configured with it.
+/// If `sim_rot` or `sim_helios_rot` is provided, each simulated sled agent
+/// serves the RoT API for the Oxide or Helios RoT, respectively, using a mock
+/// RoT configured with it.
 #[cfg(feature = "omicron-dev")]
 pub async fn omicron_dev_setup_with_config<N: NexusServer>(
     config: &mut NexusConfig,
     extra_sled_agents: u16,
     gateway_config_file: Utf8PathBuf,
     sim_rot: Option<sim::ConfigRot>,
+    sim_helios_rot: Option<sim::ConfigHeliosRot>,
 ) -> Result<ControlPlaneTestContext<N>> {
     let mut starter = ControlPlaneStarter::<N>::new("omicron-dev", config);
     starter.sim_rot = sim_rot;
+    starter.sim_helios_rot = sim_helios_rot;
 
     let log = &starter.logctx.log;
     slog::debug!(log, "Ensuring seed tarball exists");

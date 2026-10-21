@@ -191,9 +191,13 @@ pub struct ControlPlaneStarter<'a, N: NexusServer> {
 
     pub simulated_upstairs: Arc<sim::SimulatedUpstairs>,
 
-    /// Mock RoT configuration given to each sled agent started by this
-    /// starter. If `None`, the sled agents do not serve the RoT API.
+    /// Mock Oxide RoT configuration given to each sled agent started by this
+    /// starter. If `None`, the sled agents reject requests for the Oxide RoT.
     pub sim_rot: Option<sim::ConfigRot>,
+
+    /// Mock Helios RoT configuration given to each sled agent started by this
+    /// starter. If `None`, the sled agents reject requests for the Helios RoT.
+    pub sim_helios_rot: Option<sim::ConfigHeliosRot>,
 
     debug_dropbox_dir: TestTempDir,
 }
@@ -252,6 +256,7 @@ impl<'a, N: NexusServer> ControlPlaneStarter<'a, N> {
                 simulated_upstairs_log,
             )),
             sim_rot: None,
+            sim_helios_rot: None,
             debug_dropbox_dir,
         }
     }
@@ -984,6 +989,7 @@ impl<'a, N: NexusServer> ControlPlaneStarter<'a, N> {
             sled_role,
             &self.simulated_upstairs,
             self.sim_rot.clone(),
+            self.sim_helios_rot.clone(),
         )
         .await
         .expect("Failed to start sled agent");
@@ -1121,6 +1127,7 @@ impl<'a, N: NexusServer> ControlPlaneStarter<'a, N> {
             SledRole::Gimlet,
             &self.simulated_upstairs,
             self.sim_rot.clone(),
+            self.sim_helios_rot.clone(),
         )
         .await
         .expect("Failed to start sled agent");
@@ -2075,6 +2082,7 @@ pub(crate) async fn start_sled_agent(
     sled_role: SledRole,
     simulated_upstairs: &Arc<sim::SimulatedUpstairs>,
     rot: Option<sim::ConfigRot>,
+    helios_rot: Option<sim::ConfigHeliosRot>,
 ) -> Result<sim::Server, String> {
     // Generate a baseboard serial number that matches the SP configuration
     // (SimGimlet00, SimGimlet01, etc.) so that inventory can link sled agents
@@ -2083,6 +2091,7 @@ pub(crate) async fn start_sled_agent(
 
     let config = sim::Config {
         rot,
+        helios_rot,
         ..sim::Config::for_testing_with_baseboard(
             id,
             sim_mode,

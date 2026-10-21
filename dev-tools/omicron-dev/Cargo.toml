@@ -29,6 +29,7 @@ omicron-workspace-hack.workspace = true
 oxide-tokio-rt.workspace = true
 # See omicron-rpaths for more about the "pq-sys" dependency.
 pq-sys = "*"
+rcgen.workspace = true
 signal-hook-tokio.workspace = true
 sprockets-tls-test-utils.workspace = true
 tokio.workspace = true
@@ -43,5 +44,8 @@ expectorate.workspace = true
 omicron-dev-lib.workspace = true
 omicron-test-utils.workspace = true
 oxide-client.workspace = true
+sled-agent-client.workspace = true
+sled-agent-types.workspace = true
+slog.workspace = true
 subprocess.workspace = true
 tokio-postgres.workspace = true

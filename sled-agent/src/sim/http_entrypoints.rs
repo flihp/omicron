@@ -1241,9 +1241,10 @@ async fn instance_post_sim_migration_source(
 mod test {
     use crate::rot::tests::{DIGEST, mock_config};
     use crate::sim::{
-        Config, ConfigRot, NexusRegistration, Server, SimMode,
+        Config, ConfigHeliosRot, ConfigRot, NexusRegistration, Server, SimMode,
         SimulatedUpstairs, ZpoolConfig,
     };
+    use camino::Utf8Path;
     use camino_tempfile::Utf8TempDir;
     use dice_verifier::oxide_rot::verify_attestation;
     use omicron_test_utils::dev::test_setup_log;
@@ -1254,12 +1255,29 @@ mod test {
     use std::sync::Arc;
     use x509_cert::{Certificate, der::DecodePem};
 
+    /// Write a self-signed P-384 alias cert and its key to `dir` and return a
+    /// config for the mock Helios RoT that uses them
+    fn helios_rot_config(dir: &Utf8Path) -> ConfigHeliosRot {
+        let mut params = rcgen::CertificateParams::new(vec![]);
+        params.alg = &rcgen::PKCS_ECDSA_P384_SHA384;
+        let cert = rcgen::Certificate::from_params(params).unwrap();
+
+        let cert_chain = dir.join("helios-alias.certlist.pem");
+        let priv_key = dir.join("helios-alias.key.pem");
+        std::fs::write(&cert_chain, cert.serialize_pem().unwrap()).unwrap();
+        std::fs::write(&priv_key, cert.serialize_private_key_pem()).unwrap();
+
+        ConfigHeliosRot { priv_key, cert_chain }
+    }
+
     async fn start_server(
         log: &slog::Logger,
         rot: Option<ConfigRot>,
+        helios_rot: Option<ConfigHeliosRot>,
     ) -> (Server, sled_agent_client::Client) {
         let config = Config {
             rot,
+            helios_rot,
             ..Config::for_testing(
                 SledUuid::new_v4(),
                 SimMode::Explicit,
@@ -1294,7 +1312,7 @@ mod test {
         };
         let log_path = log.clone();
         let rot = ConfigRot { priv_key, cert_chain, log };
-        let (server, client) = start_server(&logctx.log, Some(rot)).await;
+        let (server, client) = start_server(&logctx.log, Some(rot), None).await;
 
         let log = client.rot_measurement_log(&Rot::Oxide).await.unwrap();
         assert_eq!(log.0.len(), 1);
@@ -1334,7 +1352,7 @@ mod test {
     #[tokio::test]
     async fn sim_rot_unconfigured() {
         let logctx = test_setup_log("sim_rot_unconfigured");
-        let (server, client) = start_server(&logctx.log, None).await;
+        let (server, client) = start_server(&logctx.log, None, None).await;
 
         let Err(err) = client.rot_measurement_log(&Rot::Oxide).await else {
             panic!("RoT API should be unavailable without a mock RoT");
@@ -1345,7 +1363,109 @@ mod test {
             "unexpected error: {err}"
         );
 
+        let Err(err) = client.rot_certificate_chain(&Rot::Helios).await else {
+            panic!("RoT API should be unavailable without a mock Helios RoT");
+        };
+        assert_eq!(
+            err.status(),
+            Some(http::StatusCode::METHOD_NOT_ALLOWED),
+            "unexpected error: {err}"
+        );
+
         drop(server);
+        logctx.cleanup_successful();
+    }
+
+    /// Get and appraise an attestation from the simulated sled agent's mock
+    /// Helios RoT
+    #[tokio::test]
+    async fn sim_helios_rot_mock() {
+        let logctx = test_setup_log("sim_helios_rot_mock");
+        let tmp = Utf8TempDir::new().unwrap();
+        let rot = helios_rot_config(tmp.path());
+        let (server, client) = start_server(&logctx.log, None, Some(rot)).await;
+
+        let chain = client.rot_certificate_chain(&Rot::Helios).await.unwrap();
+        assert_eq!(chain.0.len(), 1);
+
+        let nonce = [7u8; 48];
+        let Attestation::P384(sig) = client
+            .rot_attest(&Rot::Helios, &Nonce::N48(nonce))
+            .await
+            .unwrap()
+            .into_inner()
+        else {
+            panic!("expected a P-384 attestation");
+        };
+
+        // The attestation must verify against the alias (leaf) cert and our
+        // nonce.
+        let alias = Certificate::from_pem(&chain.0[0]).unwrap();
+        let attestation = dice_verifier::helios_rot::Attestation::P384(
+            sig.0[..].try_into().unwrap(),
+        );
+        dice_verifier::helios_rot::verify_attestation(
+            &alias,
+            &attestation,
+            &dice_verifier::helios_rot::Nonce::try_from(&nonce[..]).unwrap(),
+        )
+        .expect("attestation should verify against the alias cert");
+
+        // The Helios RoT has no measurement log ...
+        let Err(err) = client.rot_measurement_log(&Rot::Helios).await else {
+            panic!("the Helios RoT should not provide a measurement log");
+        };
+        assert_eq!(err.status(), Some(http::StatusCode::BAD_REQUEST));
+
+        // ... and only accepts 48-byte nonces.
+        let Err(err) =
+            client.rot_attest(&Rot::Helios, &Nonce::N32([7u8; 32])).await
+        else {
+            panic!("the Helios RoT should reject a 32-byte nonce");
+        };
+        assert_eq!(err.status(), Some(http::StatusCode::BAD_REQUEST));
+
+        // The Oxide RoT isn't configured.
+        let Err(err) = client.rot_certificate_chain(&Rot::Oxide).await else {
+            panic!("RoT API should be unavailable without a mock RoT");
+        };
+        assert_eq!(err.status(), Some(http::StatusCode::METHOD_NOT_ALLOWED));
+
+        drop(server);
+        logctx.cleanup_successful();
+    }
+
+    /// Starting the simulated sled agent fails if the mock Helios RoT's
+    /// artifacts can't be loaded
+    #[tokio::test]
+    async fn sim_helios_rot_bad_artifacts() {
+        let logctx = test_setup_log("sim_helios_rot_bad_artifacts");
+        let tmp = Utf8TempDir::new().unwrap();
+        let rot = ConfigHeliosRot {
+            priv_key: tmp.path().join("missing.key.pem"),
+            cert_chain: tmp.path().join("missing.certlist.pem"),
+        };
+        let config = Config {
+            helios_rot: Some(rot),
+            ..Config::for_testing(
+                SledUuid::new_v4(),
+                SimMode::Explicit,
+                None,
+                ZpoolConfig::None,
+                SledCpuFamily::AmdMilan,
+            )
+        };
+        let upstairs = Arc::new(SimulatedUpstairs::new(logctx.log.clone()));
+        let result = Server::start(
+            &config,
+            &logctx.log,
+            NexusRegistration::Background,
+            &upstairs,
+            0,
+        )
+        .await;
+        assert!(result.is_err());
+
         logctx.cleanup_successful();
     }
 }

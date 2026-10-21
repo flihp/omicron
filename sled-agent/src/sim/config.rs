@@ -83,6 +83,20 @@ pub struct ConfigRot {
     pub log: Utf8PathBuf,
 }
 
+/// Configuration for the simulated sled's Helios RoT.
+///
+/// The simulated sled agent only supports the mock Helios RoT
+/// (`helios_rot::HeliosRotMock`), which is backed by artifacts stored in local
+/// files.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ConfigHeliosRot {
+    /// path to the PEM encoded PKCS#8 P-384 private key used to sign
+    /// attestations
+    pub priv_key: Utf8PathBuf,
+    /// path to the PEM encoded certificate chain for `priv_key`, leaf first
+    pub cert_chain: Utf8PathBuf,
+}
+
 /// Configuration for a sled agent
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Config {
@@ -100,10 +114,14 @@ pub struct Config {
     pub hardware: ConfigHardware,
     /// is this sled a normal gimlet, or a scrimlet?
     pub sled_role: SledRole,
-    /// configuration for the sled's mock RoT; if `None`, the RoT API is
-    /// unavailable
+    /// configuration for the sled's mock Oxide RoT; if `None`, requests for
+    /// the Oxide RoT are rejected
     #[serde(default)]
     pub rot: Option<ConfigRot>,
+    /// configuration for the sled's mock Helios RoT; if `None`, requests for
+    /// the Helios RoT are rejected
+    #[serde(default)]
+    pub helios_rot: Option<ConfigHeliosRot>,
 }
 
 pub enum ZpoolConfig {
@@ -190,6 +208,7 @@ impl Config {
             },
             sled_role,
             rot: None,
+            helios_rot: None,
         }
     }
 }
