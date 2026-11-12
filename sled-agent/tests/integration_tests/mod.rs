@@ -4,4 +4,5 @@
 
 mod commands;
 mod early_network;
+mod sim_helios_rot;
 mod sled_registration_info;

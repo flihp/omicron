@@ -5,6 +5,7 @@
 //! HTTP entrypoint functions for the sled agent's exposed API
 
 use super::collection::PokeMode;
+use crate::rot::RotAttestor;
 use crate::support_bundle::storage::SupportBundleQueryType;
 use camino::Utf8PathBuf;
 use dropshot::ApiDescription;
@@ -67,8 +68,8 @@ use sled_agent_types::multirack::{
 };
 use sled_agent_types::probes::ProbeSet;
 use sled_agent_types::rot::{
-    Attestation, CertificateChain, MeasurementLogResponse, QualifyingData,
-    RotPathParams,
+    Attestation, CertificateChain, MeasurementLog, MeasurementLogResponse,
+    QualifyingData, Rot, RotPathParams,
 };
 use sled_agent_types::sled::AddSledRequest;
 use sled_agent_types::support_bundle::{
@@ -1148,25 +1149,36 @@ impl SledAgentApi for SledAgentSimImpl {
     }
 
     async fn rot_measurement_log(
-        _request_context: RequestContext<Self::Context>,
-        _path_params: Path<RotPathParams>,
+        request_context: RequestContext<Self::Context>,
+        path_params: Path<RotPathParams>,
     ) -> Result<HttpResponseOk<MeasurementLogResponse>, HttpError> {
-        method_unimplemented()
+        let sa = request_context.context();
+        let rot = sim_rot_attestor(sa, path_params.into_inner().rot)?;
+        let log = rot.get_measurement_log().await?;
+        Ok(HttpResponseOk(MeasurementLogResponse {
+            log: log.map(MeasurementLog::from),
+        }))
     }
 
     async fn rot_certificate_chain(
-        _request_context: RequestContext<Self::Context>,
-        _path_params: Path<RotPathParams>,
+        request_context: RequestContext<Self::Context>,
+        path_params: Path<RotPathParams>,
     ) -> Result<HttpResponseOk<CertificateChain>, HttpError> {
-        method_unimplemented()
+        let sa = request_context.context();
+        let rot = sim_rot_attestor(sa, path_params.into_inner().rot)?;
+        let chain = rot.get_certificate_chain().await?;
+        Ok(HttpResponseOk(chain.into()))
     }
 
     async fn rot_attest(
-        _request_context: RequestContext<Self::Context>,
-        _path_params: Path<RotPathParams>,
-        _body: TypedBody<QualifyingData>,
+        request_context: RequestContext<Self::Context>,
+        path_params: Path<RotPathParams>,
+        body: TypedBody<QualifyingData>,
     ) -> Result<HttpResponseOk<Attestation>, HttpError> {
-        method_unimplemented()
+        let sa = request_context.context();
+        let rot = sim_rot_attestor(sa, path_params.into_inner().rot)?;
+        let attestation = rot.attest(body.into_inner().into()).await?;
+        Ok(HttpResponseOk(attestation.into()))
     }
 
     async fn multirack_join_complete(
@@ -1185,6 +1197,18 @@ impl SledAgentApi for SledAgentSimImpl {
         request_context: RequestContext<Self::Context>,
     ) -> Result<HttpResponseOk<SledRegistrationInfo>, HttpError> {
         Ok(HttpResponseOk(request_context.context().sled_registration_info()))
+    }
+}
+
+/// The simulated sled agent only implements the Helios RoT, and only when it
+/// has been configured. Requests for any other RoT are unimplemented.
+fn sim_rot_attestor(
+    sa: &SledAgent,
+    rot: Rot,
+) -> Result<&RotAttestor, HttpError> {
+    match (rot, sa.helios_rot()) {
+        (Rot::Helios, Some(attestor)) => Ok(attestor),
+        _ => method_unimplemented(),
     }
 }
 

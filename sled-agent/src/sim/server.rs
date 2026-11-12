@@ -154,7 +154,8 @@ impl Server {
             simulated_upstairs.clone(),
             sled_index,
         )
-        .await;
+        .await
+        .context("creating simulated sled agent")?;
 
         let dropshot_log = log.new(o!("component" => "dropshot"));
         let http_server = dropshot::ServerBuilder::new(

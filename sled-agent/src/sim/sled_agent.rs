@@ -11,8 +11,10 @@ use super::instance::{self, SimInstance};
 use super::storage::CrucibleData;
 use super::storage::Storage;
 use crate::artifact_store::ArtifactStore;
+use crate::config::HeliosRotConfig;
 use crate::instance_manager::VmmRegistrationDisallowedReason;
 use crate::nexus::NexusClient;
+use crate::rot::{RotAttestor, RotError};
 use crate::sim::SimulatedUpstairs;
 use crate::sim::simulatable::Simulatable;
 use crate::support_bundle::storage::SupportBundleQueryType;
@@ -166,6 +168,8 @@ pub struct SledAgent {
     network_config_tx: watch::Sender<SystemNetworkingConfig>,
     /// Keeps the scrimlet reconcilers alive.
     scrimlet_reconcilers: ScrimletReconcilers,
+    /// The simulated Helios RoT, if configured.
+    helios_rot: Option<RotAttestor>,
 }
 
 /// A queue of pending pauses for one of the simulated sled-agent's VMM
@@ -399,10 +403,24 @@ impl SledAgent {
         nexus_client: Arc<NexusClient>,
         simulated_upstairs: Arc<SimulatedUpstairs>,
         sled_index: u16,
-    ) -> Arc<SledAgent> {
+    ) -> Result<Arc<SledAgent>, RotError> {
         let id = config.id;
         let sim_mode = config.sim_mode;
         info!(&log, "created simulated sled agent"; "sim_mode" => ?sim_mode);
+
+        let helios_rot = config
+            .helios_rot
+            .as_ref()
+            .map(|rot| {
+                RotAttestor::new_helios(
+                    &log,
+                    &HeliosRotConfig::Local {
+                        priv_key: rot.priv_key.clone(),
+                        cert_chain: rot.cert_chain.clone(),
+                    },
+                )
+            })
+            .transpose()?;
 
         let instance_log = log.new(o!("kind" => "instances"));
         let storage_log = log.new(o!("kind" => "storage"));
@@ -459,7 +477,7 @@ impl SledAgent {
 
         let scrimlet_reconcilers = ScrimletReconcilers::new(&log);
 
-        Arc::new(SledAgent {
+        Ok(Arc::new(SledAgent {
             id,
             ip: config.dropshot.bind_address.ip(),
             vmms: Arc::new(SimCollection::new(
@@ -489,7 +507,13 @@ impl SledAgent {
             support_logs: Mutex::new(HashMap::new()),
             network_config_tx,
             scrimlet_reconcilers,
-        })
+            helios_rot,
+        }))
+    }
+
+    /// The simulated Helios RoT, if one is configured.
+    pub fn helios_rot(&self) -> Option<&RotAttestor> {
+        self.helios_rot.as_ref()
     }
 
     /// Injects a synthetic zone log file to be served by the support-logs
