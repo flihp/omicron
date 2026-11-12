@@ -250,15 +250,20 @@ pub mod probes {
 }
 
 pub mod rot {
-    pub use crate::v19::attestation::Attestation;
     pub use crate::v19::attestation::CertificateChain;
     pub use crate::v19::attestation::Ed25519Signature;
     pub use crate::v19::attestation::Measurement;
     pub use crate::v19::attestation::MeasurementLog;
-    pub use crate::v19::attestation::Nonce;
-    pub use crate::v19::attestation::Rot;
-    pub use crate::v19::attestation::RotPathParams;
     pub use crate::v19::attestation::Sha3_256Digest;
+
+    pub use crate::v64::attestation::Attestation;
+    pub use crate::v64::attestation::MeasurementLogResponse;
+    pub use crate::v64::attestation::MissingMeasurementLogError;
+    pub use crate::v64::attestation::P384AttestationError;
+    pub use crate::v64::attestation::P384Signature;
+    pub use crate::v64::attestation::QualifyingData;
+    pub use crate::v64::attestation::Rot;
+    pub use crate::v64::attestation::RotPathParams;
 }
 
 pub mod sled {

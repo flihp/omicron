@@ -337,6 +337,22 @@ pub struct Config {
     /// root certificates and whether to use local certificate chain or
     /// one over IPCC
     pub sprockets: SprocketsConfig,
+
+    /// Configuration for the Helios RoT. If unset, requests to the Helios RoT
+    /// are rejected.
+    #[serde(default)]
+    pub helios_rot: Option<HeliosRotConfig>,
+}
+
+/// Configuration for the Helios RoT.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "which", rename_all = "snake_case")]
+pub enum HeliosRotConfig {
+    /// Use the RoT provided by the Helios `os_rot` driver.
+    OsRot,
+    /// Use a mock RoT backed by a P-384 private key and certificate chain
+    /// loaded from local PEM files.
+    Local { priv_key: Utf8PathBuf, cert_chain: Utf8PathBuf },
 }
 
 #[derive(Debug, thiserror::Error)]
